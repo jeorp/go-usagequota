@@ -58,13 +58,13 @@ func (s *Store) Update(ctx context.Context, key quota.Key, requestID string, fn 
 		if err := fn(&usage, &reservation); err != nil {
 			return err
 		}
+		if reservation == (quota.Reservation{}) {
+			return quota.ErrInvalid
+		}
 
 		budget.Usage = usage
 		if err := tx.Save(&budget).Error; err != nil {
 			return err
-		}
-		if reservation == (quota.Reservation{}) {
-			return tx.Delete(&row).Error
 		}
 		row.Reservation = reservation
 		return tx.Save(&row).Error
