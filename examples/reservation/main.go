@@ -1,4 +1,4 @@
-// A deterministic, credential-free demonstration of the reservation lifecycle.
+// This example shows how to reserve, cancel, and commit usage.
 package main
 
 import (
@@ -14,32 +14,52 @@ import (
 
 func main() {
 	ctx := context.Background()
-	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
-	l := quota.New(memory.New(), quota.WithClock(func() time.Time { return now }))
-	key := quota.Key{Subject: "user-123", Resource: "ai-reviews", Period: quota.Month(now)}
-	first, err := l.Reserve(ctx, key, "request-1", 1, 1)
+	demoTime := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	limiter := quota.New(memory.New(), quota.WithClock(func() time.Time { return demoTime }))
+	key := quota.Key{
+		Subject:  "user-123",
+		Resource: "reviews",
+		Period:   quota.Month(demoTime),
+	}
+	const limit int64 = 1
+	const firstRequest = "request-1"
+	const secondRequest = "request-2"
+
+	// Reserve the only available unit for the first request.
+	first, err := limiter.Reserve(ctx, key, firstRequest, 1, limit)
 	check(err)
-	fmt.Printf("first request: created=%t state=%s\n", first.Created, first.Reservation.State)
-	replay, err := l.Reserve(ctx, key, "request-1", 1, 1)
+	fmt.Printf("first request: new reservation = %t\n", first.Created)
+
+	// A retry with the same request ID uses the existing reservation.
+	retry, err := limiter.Reserve(ctx, key, firstRequest, 1, limit)
 	check(err)
-	fmt.Printf("same request: created=%t state=%s\n", replay.Created, replay.Reservation.State)
-	_, err = l.Reserve(ctx, key, "request-2", 1, 1)
+	fmt.Printf("retry: new reservation = %t\n", retry.Created)
+
+	// The second request cannot start while the first holds the unit.
+	_, err = limiter.Reserve(ctx, key, secondRequest, 1, limit)
 	if !errors.Is(err, quota.ErrExceeded) {
 		log.Fatalf("expected limit error, got %v", err)
 	}
-	fmt.Println("another request: limit exceeded")
-	// The first job is known not to have run. Release its budget.
-	check(l.Cancel(ctx, key, "request-1"))
-	fmt.Println("first request cancelled: capacity returned")
-	second, err := l.Reserve(ctx, key, "request-2", 1, 1)
+	fmt.Println("second request: limit exceeded")
+
+	// The first request did not run, so release its reserved unit.
+	check(limiter.Cancel(ctx, key, firstRequest))
+	fmt.Println("first request: cancelled")
+
+	// The second request can now reserve the unit.
+	second, err := limiter.Reserve(ctx, key, secondRequest, 1, limit)
 	check(err)
 	if second.Created {
-		// Application work belongs here. The example has no external side effects.
-		check(l.Commit(ctx, key, "request-2"))
+		// Only a new reservation starts work. This demo has no external work;
+		// a real caller would commit only after its work succeeds.
+		check(limiter.Commit(ctx, key, secondRequest))
+		fmt.Println("second request: committed")
 	}
-	u, err := l.Usage(ctx, key)
+
+	usage, err := limiter.Usage(ctx, key)
 	check(err)
-	fmt.Printf("usage: reserved=%d committed=%d remaining=%d\n", u.Reserved, u.Committed, u.Remaining(1))
+	fmt.Printf("usage: reserved=%d committed=%d remaining=%d\n",
+		usage.Reserved, usage.Committed, usage.Remaining(limit))
 }
 
 func check(err error) {

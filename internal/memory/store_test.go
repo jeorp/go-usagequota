@@ -12,7 +12,7 @@ import (
 )
 
 func TestContract(t *testing.T) {
-	quotatest.Run(t, func(*testing.T) quota.Store { return memory.New() }, nil)
+	quotatest.Run(t, func(*testing.T) quota.Store { return memory.New() })
 }
 
 func TestBlockedUpdateHonorsContext(t *testing.T) {

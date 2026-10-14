@@ -78,7 +78,7 @@ func testStore(t *testing.T) *Store {
 }
 
 func TestContract(t *testing.T) {
-	quotatest.Run(t, func(t *testing.T) quota.Store { return testStore(t) }, nil)
+	quotatest.Run(t, func(t *testing.T) quota.Store { return testStore(t) })
 }
 
 func TestIndependentClientsShareBudget(t *testing.T) {

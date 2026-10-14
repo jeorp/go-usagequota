@@ -10,23 +10,30 @@ import (
 
 func TestBudgetIdentity(t *testing.T) {
 	key := quotatest.Key()
-	id := budgetDigest(key)
-	if len(id) != 32 {
-		t.Fatalf("digest length = %d", len(id))
+	digest := budgetDigest(key)
+	if len(digest) != 32 {
+		t.Fatalf("digest length = %d", len(digest))
 	}
-	other := key
-	other.Period.Start = other.Period.Start.In(time.FixedZone("JST", 9*60*60))
-	if !bytes.Equal(budgetDigest(other), id) {
-		t.Fatal("same instant generated a different ID")
-	}
-	other = key
-	other.Period.End = other.Period.End.Add(time.Nanosecond)
-	if bytes.Equal(budgetDigest(other), id) {
-		t.Fatal("different end time generated the same ID")
-	}
-	key.Subject, key.Resource = "a/b", "c"
-	other.Subject, other.Resource, other.Period = "a", "b/c", key.Period
-	if bytes.Equal(budgetDigest(key), budgetDigest(other)) {
-		t.Fatal("delimiter collision")
-	}
+	t.Run("same_instant_in_another_zone", func(t *testing.T) {
+		other := key
+		other.Period.Start = other.Period.Start.In(time.FixedZone("JST", 9*60*60))
+		if !bytes.Equal(budgetDigest(other), digest) {
+			t.Fatal("same instant generated a different ID")
+		}
+	})
+	t.Run("different_end_time", func(t *testing.T) {
+		other := key
+		other.Period.End = other.Period.End.Add(time.Nanosecond)
+		if bytes.Equal(budgetDigest(other), digest) {
+			t.Fatal("different end time generated the same ID")
+		}
+	})
+	t.Run("slash_in_subject_or_resource", func(t *testing.T) {
+		first, second := key, key
+		first.Subject, first.Resource = "a/b", "c"
+		second.Subject, second.Resource = "a", "b/c"
+		if bytes.Equal(budgetDigest(first), budgetDigest(second)) {
+			t.Fatal("different keys generated the same ID")
+		}
+	})
 }

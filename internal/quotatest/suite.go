@@ -21,15 +21,13 @@ func Key() quota.Key {
 }
 
 // Run exercises accounting, replay, concurrency and the atomic-store contract.
-// retryable may identify transport errors that guarantee no commit. Those calls
-// are retried once after a concurrent burst; unknown outcomes are never retried.
-func Run(t *testing.T, factory func(*testing.T) quota.Store, retryable func(error) bool) {
+func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 	t.Helper()
 	ctx := context.Background()
 	newLimiter := func(store quota.Store) *quota.Limiter {
 		return quota.New(store, quota.WithClock(func() time.Time { return Now }))
 	}
-	t.Run("lifecycle", func(t *testing.T) {
+	t.Run("reserve_and_replay", func(t *testing.T) {
 		l, key := newLimiter(factory(t)), Key()
 		wantUsage(t, l, key, 0, 0)
 		result, err := l.Reserve(ctx, key, "request/1", 7, 10)
@@ -47,20 +45,37 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store, retryable func(erro
 		if err != nil || result.Created || result.Reservation.State != quota.Pending {
 			t.Fatalf("pending replay = %+v, %v", result, err)
 		}
+		// A rejected request leaves its ID available for a smaller reservation.
+		if _, err := l.Reserve(ctx, key, "request/2", 3, 10); err != nil {
+			t.Fatal(err)
+		}
+		wantUsage(t, l, key, 10, 0)
+	})
+	t.Run("commit_and_replay", func(t *testing.T) {
+		l, key := newLimiter(factory(t)), Key()
+		if _, err := l.Reserve(ctx, key, "request/1", 7, 10); err != nil {
+			t.Fatal(err)
+		}
 		for i := 0; i < 2; i++ {
 			if err := l.Commit(ctx, key, "request/1"); err != nil {
 				t.Fatal(err)
 			}
 		}
 		wantUsage(t, l, key, 0, 7)
-		result, err = l.Reserve(ctx, key, "request/1", 7, 10)
+		result, err := l.Reserve(ctx, key, "request/1", 7, 10)
 		if err != nil || result.Created || result.Reservation.State != quota.Committed {
 			t.Fatalf("committed replay = %+v, %v", result, err)
 		}
 		if err := l.Cancel(ctx, key, "request/1"); !errors.Is(err, quota.ErrFinalized) {
 			t.Fatalf("cancel committed: %v", err)
 		}
-		// A rejected request did not consume its ID or leave any accounting behind.
+		if _, err := l.Reserve(ctx, key, "request/2", 3, 10); err != nil {
+			t.Fatal(err)
+		}
+		wantUsage(t, l, key, 3, 7)
+	})
+	t.Run("cancel_and_missing_requests", func(t *testing.T) {
+		l, key := newLimiter(factory(t)), Key()
 		if _, err := l.Reserve(ctx, key, "request/2", 3, 10); err != nil {
 			t.Fatal(err)
 		}
@@ -69,7 +84,7 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store, retryable func(erro
 				t.Fatal(err)
 			}
 		}
-		wantUsage(t, l, key, 0, 7)
+		wantUsage(t, l, key, 0, 0)
 		if err := l.Commit(ctx, key, "request/2"); !errors.Is(err, quota.ErrFinalized) {
 			t.Fatalf("commit cancelled: %v", err)
 		}
@@ -82,16 +97,16 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store, retryable func(erro
 		if err := l.Cancel(ctx, key, "missing"); !errors.Is(err, quota.ErrNotFound) {
 			t.Fatalf("cancel missing: %v", err)
 		}
-		if _, err := l.Reserve(ctx, key, "request/3", 3, 10); err != nil {
+		if _, err := l.Reserve(ctx, key, "request/3", 10, 10); err != nil {
 			t.Fatal(err)
 		}
-		wantUsage(t, l, key, 3, 7)
+		wantUsage(t, l, key, 10, 0)
 	})
 	t.Run("one_slot_100_contenders", func(t *testing.T) {
 		store, key := factory(t), Key()
 		// Independent limiters must coordinate through the shared store.
 		var accepted atomic.Int64
-		parallel(t, 100, retryable, func(i int) error {
+		parallel(t, 100, func(i int) error {
 			result, err := newLimiter(store).Reserve(ctx, key, fmt.Sprint(i), 1, 1)
 			if errors.Is(err, quota.ErrExceeded) {
 				return nil
@@ -109,7 +124,7 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store, retryable func(erro
 	t.Run("same_request_100_contenders", func(t *testing.T) {
 		store, key := factory(t), Key()
 		var created atomic.Int64
-		parallel(t, 100, retryable, func(_ int) error {
+		parallel(t, 100, func(_ int) error {
 			result, err := newLimiter(store).Reserve(ctx, key, "same", 1, 1)
 			if result.Created {
 				created.Add(1)
@@ -127,7 +142,7 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store, retryable func(erro
 			t.Fatal(err)
 		}
 		var succeeded atomic.Int64
-		parallel(t, 2, retryable, func(i int) error {
+		parallel(t, 2, func(i int) error {
 			var err error
 			if i == 0 {
 				err = l.Commit(ctx, key, "race")
@@ -258,39 +273,25 @@ func wantUsage(t *testing.T, l *quota.Limiter, key quota.Key, reserved, committe
 	}
 }
 
-func parallel(t *testing.T, count int, retryable func(error) bool, fn func(int) error) {
+func parallel(t *testing.T, count int, fn func(int) error) {
 	t.Helper()
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	type outcome struct {
-		index int
-		err   error
-	}
-	results := make(chan outcome, count)
+	results := make(chan error, count)
 	for i := 0; i < count; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-start
-			results <- outcome{index: i, err: fn(i)}
+			results <- fn(i)
 		}()
 	}
 	close(start)
 	wg.Wait()
 	close(results)
-	var retried int
-	for result := range results {
-		if result.err != nil && retryable != nil && retryable(result.err) {
-			// Exercise client retry after contention has subsided. A retry must
-			// still honor the limit and request identity, not create extra usage.
-			retried++
-			result.err = fn(result.index)
+	for err := range results {
+		if err != nil {
+			t.Error(err)
 		}
-		if result.err != nil {
-			t.Error(result.err)
-		}
-	}
-	if retried > 0 {
-		t.Logf("retried %d uncommitted transactions after the concurrent burst", retried)
 	}
 }

@@ -124,17 +124,9 @@ func FuzzAccounting(f *testing.F) {
 		l := quota.New(memory.New(), quota.WithClock(func() time.Time { return quotatest.Now }))
 		ctx, key := context.Background(), quotatest.Key()
 		states := map[string]quota.State{}
-		for _, op := range operations {
+		// Each byte selects one of eight request IDs and an operation.
+		for step, op := range operations {
 			id := string(rune('a' + (op/3)%8))
-			var reserved, committed int64
-			for _, state := range states {
-				if state == quota.Pending {
-					reserved++
-				}
-				if state == quota.Committed {
-					committed++
-				}
-			}
 			var wantErr, gotErr error
 			switch op % 3 {
 			case 0:
@@ -143,11 +135,10 @@ func FuzzAccounting(f *testing.F) {
 				case quota.Cancelled:
 					wantErr = quota.ErrFinalized
 				case "":
-					if reserved+committed == 3 {
+					if modeledUsage(states).Total() == 3 {
 						wantErr = quota.ErrExceeded
 					} else {
 						states[id] = quota.Pending
-						reserved++
 					}
 				}
 			case 1, 2:
@@ -163,10 +154,6 @@ func FuzzAccounting(f *testing.F) {
 					wantErr = quota.ErrNotFound
 				case quota.Pending:
 					states[id] = target
-					reserved--
-					if target == quota.Committed {
-						committed++
-					}
 				default:
 					if states[id] != target {
 						wantErr = quota.ErrFinalized
@@ -174,12 +161,26 @@ func FuzzAccounting(f *testing.F) {
 				}
 			}
 			if !errors.Is(gotErr, wantErr) {
-				t.Fatalf("operation %d: got %v, want %v", op, gotErr, wantErr)
+				t.Fatalf("step %d, operation %d, request %q: got %v, want %v", step, op%3, id, gotErr, wantErr)
 			}
 			u, err := l.Usage(ctx, key)
-			if err != nil || u != (quota.Usage{Reserved: reserved, Committed: committed}) {
-				t.Fatalf("usage = %+v, %v; want %d/%d", u, err, reserved, committed)
+			wantUsage := modeledUsage(states)
+			if err != nil || u != wantUsage {
+				t.Fatalf("step %d: usage = %+v, %v; want %+v", step, u, err, wantUsage)
 			}
 		}
 	})
+}
+
+func modeledUsage(states map[string]quota.State) quota.Usage {
+	var usage quota.Usage
+	for _, state := range states {
+		switch state {
+		case quota.Pending:
+			usage.Reserved++
+		case quota.Committed:
+			usage.Committed++
+		}
+	}
+	return usage
 }
