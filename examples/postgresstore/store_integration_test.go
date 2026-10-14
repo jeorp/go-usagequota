@@ -25,6 +25,10 @@ import (
 
 var tableSequence atomic.Uint64
 
+type businessRecord struct {
+	ID string `gorm:"primaryKey"`
+}
+
 func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("POSTGRES_TEST_DSN")
@@ -100,6 +104,88 @@ func TestIndependentClientsShareBudget(t *testing.T) {
 	}
 	if u, err := first.Usage(ctx, key); err != nil || u != (quota.Usage{Committed: 1}) {
 		t.Fatalf("shared usage = %+v, %v", u, err)
+	}
+}
+
+func TestSpendSharesBusinessTransaction(t *testing.T) {
+	store := testStore(t)
+	db := store.db
+	if err := db.AutoMigrate(&businessRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Migrator().DropTable(&businessRecord{}); err != nil {
+			t.Error(err)
+		}
+	})
+
+	ctx, key := context.Background(), quotatest.Key()
+	clock := quota.WithClock(func() time.Time { return quotatest.Now })
+	rolledBack := errors.New("roll back business work")
+	err := db.Transaction(func(tx *gorm.DB) error {
+		limiter := quota.New(New(tx), clock)
+		result, err := limiter.Spend(ctx, key, "rolled-back", 1, 1)
+		if err != nil {
+			return err
+		}
+		if !result.Created {
+			return fmt.Errorf("spend in rolled-back transaction was a replay: %+v", result)
+		}
+		if err := tx.Create(&businessRecord{ID: "rolled-back"}).Error; err != nil {
+			return err
+		}
+		return rolledBack
+	})
+	if !errors.Is(err, rolledBack) {
+		t.Fatalf("business rollback = %v", err)
+	}
+	var count int64
+	if err := db.Model(&businessRecord{}).Where("id = ?", "rolled-back").Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("rolled-back business record: count=%d, err=%v", count, err)
+	}
+	limiter := quota.New(store, clock)
+	if usage, err := limiter.Usage(ctx, key); err != nil || usage != (quota.Usage{}) {
+		t.Fatalf("usage after business rollback = %+v, %v", usage, err)
+	}
+
+	err = db.Transaction(func(tx *gorm.DB) error {
+		limiter := quota.New(New(tx), clock)
+		result, err := limiter.Spend(ctx, key, "committed", 1, 1)
+		if err != nil {
+			return err
+		}
+		if !result.Created {
+			return fmt.Errorf("spend in committed transaction was a replay: %+v", result)
+		}
+		return tx.Create(&businessRecord{ID: "committed"}).Error
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&businessRecord{}).Where("id = ?", "committed").Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("committed business record: count=%d, err=%v", count, err)
+	}
+	if usage, err := limiter.Usage(ctx, key); err != nil || usage != (quota.Usage{Committed: 1}) {
+		t.Fatalf("usage after business commit = %+v, %v", usage, err)
+	}
+	err = db.Transaction(func(tx *gorm.DB) error {
+		result, err := quota.New(New(tx), clock).Spend(ctx, key, "committed", 1, 1)
+		if err != nil {
+			return err
+		}
+		if result.Created {
+			return fmt.Errorf("replayed spend created another charge: %+v", result)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&businessRecord{}).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("business records after replay: count=%d, err=%v", count, err)
+	}
+	if usage, err := limiter.Usage(ctx, key); err != nil || usage != (quota.Usage{Committed: 1}) {
+		t.Fatalf("usage after replay = %+v, %v", usage, err)
 	}
 }
 

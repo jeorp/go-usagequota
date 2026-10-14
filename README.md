@@ -16,7 +16,25 @@ Use `Reserve` → `Commit` when work has separate start and completion steps:
 
 Both reserved and completed work count toward the limit. Use the same request ID when retrying: `Reserve` will not create a second reservation, and calling `Commit` again is safe. `Commit` requires an earlier `Reserve`.
 
-You can use either approach with a daily, monthly, or custom period.
+Use `Spend` when a successful business write and its quota charge must commit together. Start a database transaction, pass it to `postgresstore.New`, then write business data through that same transaction. A retry with the same request ID and amount returns `Created=false` without charging again. For example, with a GORM `db` and a `work` record:
+
+```go
+err := db.Transaction(func(tx *gorm.DB) error {
+	limiter := quota.New(postgresstore.New(tx))
+	result, err := limiter.Spend(ctx, key, requestID, amount, limit)
+	if err != nil {
+		return err
+	}
+	if !result.Created {
+		return nil // The request was already committed.
+	}
+	return tx.Create(&work).Error
+})
+```
+
+Returning an error rolls back both the charge and the business write. The PostgreSQL store uses a savepoint inside an existing GORM transaction; keep GORM's nested transactions enabled for this pattern.
+
+These approaches work with a daily, monthly, or custom period.
 
 ## Failures and retries
 
@@ -25,6 +43,7 @@ The limiter returns errors to the caller. It does not automatically retry operat
 | Operation | If the update is not saved | How to recover from a temporary storage error |
 | --- | --- | --- |
 | `Reserve` | No new reservation or usage is recorded. | Do not start work. Retry with the same key, request ID, and amount. |
+| `Spend` | The charge and business write both roll back when they share a transaction. | Retry the whole transaction with the same key, request ID, and amount. |
 | `Commit` | An existing pending reservation stays pending and still counts toward the limit. | If the work succeeded, retry only `Commit`, not the work. Committing an already committed reservation succeeds without counting it again. |
 | `Cancel` | An existing pending reservation stays pending and still counts toward the limit. | Retry `Cancel` only when you know the work did not run. Cancelling an already cancelled reservation succeeds. |
 

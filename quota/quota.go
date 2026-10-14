@@ -185,8 +185,9 @@ func (l *Limiter) Reserve(ctx context.Context, key Key, requestID string, amount
 	return result, nil
 }
 
-// Spend atomically commits an allowance without a pending reservation. It is
-// suitable when the caller saves the work and its quota in one transaction.
+// Spend atomically commits an allowance without a pending reservation. To save
+// application work with the charge, use a Store bound to the caller's
+// transaction and commit that transaction only after both operations succeed.
 // Reusing the same request ID with the same amount is idempotent.
 func (l *Limiter) Spend(ctx context.Context, key Key, requestID string, amount, limit int64) (SpendResult, error) {
 	if !key.valid() || requestID == "" || amount <= 0 || limit < 0 {
