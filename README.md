@@ -55,11 +55,31 @@ Use `errors.Is` to inspect errors, including wrapped store errors. These errors 
 
 ## Stores
 
-`quota.Store` is the public storage contract. An implementation must update usage and a reservation atomically. The repository includes a [PostgreSQL implementation example](examples/postgresstore/store.go) in a separate module and an internal memory store for tests and the demo. The library module has no database driver dependency.
+`quota.Store` is the public storage contract. An implementation must update usage and a reservation atomically. The repository includes a [GORM/PostgreSQL implementation example](examples/postgresstore/store.go) in a separate module and an internal memory store for tests and the demo. GORM and its driver are dependencies of the example only; the library module has no database driver dependency.
+
+### PostgreSQL with GORM
+
+`postgresstore.New` accepts a `*gorm.DB` opened with `gorm.io/driver/postgres`. Pass the base connection, not an active transaction, so each operation commits before returning success. The application owns the connection and closes it on shutdown.
+
+At application startup, using your context and PostgreSQL DSN:
+
+```go
+db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+if err != nil {
+    return err
+}
+store := postgresstore.New(db, "public")
+if err := store.Init(ctx); err != nil {
+    return err
+}
+limiter := quota.New(store)
+```
+
+`Init` creates missing tables in an existing schema. The [schema definition](examples/postgresstore/schema.go) uses explicit SQL to preserve the database constraints and leaves existing tables unchanged. Applications can create the same tables through their own migrations instead. Existing data from the `database/sql` example uses the same tables and keys and needs no conversion.
 
 ## Get started
 
-Requires Go 1.24 or later.
+Requires Go 1.25 or later.
 
 ```sh
 go get github.com/jeorp/go-usagequota@latest

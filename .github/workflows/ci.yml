@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ matrix.module }}/go.mod
           cache: false
       - uses: golangci/golangci-lint-action@v9
         with:
@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: examples/postgresstore/go.mod
           cache-dependency-path: examples/postgresstore/go.sum
       - run: make postgres-up
       - run: make integration

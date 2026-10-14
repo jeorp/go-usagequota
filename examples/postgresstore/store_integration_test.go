@@ -4,17 +4,17 @@ package postgresstore
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	_ "github.com/lib/pq"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"github.com/jeorp/go-usagequota/internal/quotatest"
 	"github.com/jeorp/go-usagequota/quota"
@@ -37,36 +37,44 @@ func testDSN(t *testing.T) string {
 	return dsn
 }
 
-func testDB(t *testing.T) *sql.DB {
+func testDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", testDSN(t))
+	db, err := gorm.Open(postgres.Open(testDSN(t)), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.SetMaxOpenConns(20)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+	sqlDB, err := db.DB()
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	sqlDB.SetMaxOpenConns(20)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sqlDB.PingContext(ctx); err != nil {
+		t.Fatal(err)
+	}
 	return db
 }
 
 func testStore(t *testing.T) *Store {
 	t.Helper()
-	db := testDB(t)
 	schema := fmt.Sprintf("quota_test_%d_%d", time.Now().UnixNano(), schemaSequence.Add(1))
+	return testStoreInSchema(t, schema)
+}
+
+func testStoreInSchema(t *testing.T, schema string) *Store {
+	t.Helper()
+	db := testDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := db.ExecContext(ctx, "CREATE SCHEMA "+quoteIdentifier(schema)); err != nil {
+	if err := db.WithContext(ctx).Exec("CREATE SCHEMA " + quoteIdentifier(schema)).Error; err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if _, err := db.ExecContext(ctx, "DROP SCHEMA "+quoteIdentifier(schema)+" CASCADE"); err != nil {
+		if err := db.WithContext(ctx).Exec("DROP SCHEMA " + quoteIdentifier(schema) + " CASCADE").Error; err != nil {
 			t.Error(err)
 		}
 	})
@@ -84,7 +92,7 @@ func TestContract(t *testing.T) {
 func TestIndependentClientsShareBudget(t *testing.T) {
 	store := testStore(t)
 	db := testDB(t)
-	other := New(db, strings.Trim(store.schema, `"`))
+	other := New(db, store.schema)
 	ctx, key := context.Background(), quotatest.Key()
 	clock := quota.WithClock(func() time.Time { return quotatest.Now })
 	first, second := quota.New(store, clock), quota.New(other, clock)
@@ -99,5 +107,74 @@ func TestIndependentClientsShareBudget(t *testing.T) {
 	}
 	if u, err := first.Usage(ctx, key); err != nil || u != (quota.Usage{Committed: 1}) {
 		t.Fatalf("shared usage = %+v, %v", u, err)
+	}
+}
+
+func TestWriteErrorRollsBackUsage(t *testing.T) {
+	store := testStore(t)
+	ctx, key := context.Background(), quotatest.Key()
+	limiter := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
+	if _, err := limiter.Reserve(ctx, key, "id", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	err := store.Update(ctx, key, "id", func(usage *quota.Usage, reservation *quota.Reservation) error {
+		*usage = quota.Usage{Committed: 1}
+		reservation.State = "invalid"
+		return nil
+	})
+	if err == nil {
+		t.Fatal("invalid reservation was saved")
+	}
+	usage, err := store.Read(ctx, key)
+	if err != nil || usage != (quota.Usage{Reserved: 1}) {
+		t.Fatalf("usage after rollback = %+v, %v", usage, err)
+	}
+	if err := limiter.Commit(ctx, key, "id"); err != nil {
+		t.Fatalf("original reservation was not preserved: %v", err)
+	}
+}
+
+func TestUpdateClearsReservation(t *testing.T) {
+	store := testStore(t)
+	ctx, key := context.Background(), quotatest.Key()
+	limiter := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
+	for _, id := range []string{"remove", "keep"} {
+		if _, err := limiter.Reserve(ctx, key, id, 1, 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := store.Update(ctx, key, "remove", func(usage *quota.Usage, reservation *quota.Reservation) error {
+		usage.Reserved -= reservation.Amount
+		*reservation = quota.Reservation{}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := limiter.Reserve(ctx, key, "remove", 1, 2)
+	if err != nil || !result.Created {
+		t.Fatalf("reserve after deletion = %+v, %v", result, err)
+	}
+	if err := limiter.Commit(ctx, key, "keep"); err != nil {
+		t.Fatalf("unrelated reservation was deleted: %v", err)
+	}
+}
+
+func TestQuotedSchema(t *testing.T) {
+	schema := fmt.Sprintf("quota.test_%d_\"quoted\"", time.Now().UnixNano())
+	store := testStoreInSchema(t, schema)
+	if err := store.Init(context.Background()); err != nil {
+		t.Fatalf("repeated initialization: %v", err)
+	}
+	limiter := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
+	ctx, key := context.Background(), quotatest.Key()
+	if _, err := limiter.Reserve(ctx, key, "id", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := limiter.Commit(ctx, key, "id"); err != nil {
+		t.Fatal(err)
+	}
+	if usage, err := limiter.Usage(ctx, key); err != nil || usage != (quota.Usage{Committed: 1}) {
+		t.Fatalf("usage = %+v, %v", usage, err)
 	}
 }

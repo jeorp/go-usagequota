@@ -1,5 +1,4 @@
-// Package postgresstore shows how to implement quota.Store with PostgreSQL transactions.
-// It accepts a database/sql connection; the caller supplies a PostgreSQL driver.
+// Package postgresstore implements quota.Store using GORM and PostgreSQL.
 package postgresstore
 
 import (
@@ -7,68 +6,98 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"strings"
 	"time"
 
 	"github.com/jeorp/go-usagequota/quota"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Store keeps budgets in a caller-selected PostgreSQL schema. The caller owns db.
 // Keep budget and reservation rows for as long as request IDs must be deduplicated.
 type Store struct {
-	db     *sql.DB
+	db     *gorm.DB
 	schema string
+}
+
+type budgetRow struct {
+	KeyHash     []byte `gorm:"primaryKey"`
+	quota.Usage `gorm:"embedded"`
+}
+
+type reservationRow struct {
+	KeyHash           []byte `gorm:"primaryKey"`
+	RequestHash       []byte `gorm:"primaryKey"`
+	quota.Reservation `gorm:"embedded"`
 }
 
 var _ quota.Store = (*Store)(nil)
 
-// New constructs a store for an existing schema, such as "public". Init must
-// be called once before use, or the same tables must be created by a migration.
-func New(db *sql.DB, schema string) *Store {
+// New constructs a store for an existing schema, such as "public". Pass a base
+// GORM connection, not an active transaction. Call Init before first use, or
+// create the same tables with a migration.
+func New(db *gorm.DB, schema string) *Store {
 	if db == nil || schema == "" || len(schema) > 63 || strings.ContainsRune(schema, 0) {
 		panic("postgresstore: invalid database or schema")
 	}
-	return &Store{db: db, schema: quoteIdentifier(schema)}
+	return &Store{db: db, schema: schema}
 }
 
-func quoteIdentifier(value string) string {
-	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+// Update locks the budget before reading its reservation. All writers to the
+// same budget take this lock, so the callback sees the last committed state.
+func (s *Store) Update(ctx context.Context, key quota.Key, requestID string, fn func(*quota.Usage, *quota.Reservation) error) error {
+	keyHash, requestHash := budgetDigest(key), requestDigest(requestID)
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		budget := budgetRow{KeyHash: keyHash}
+		if err := tx.Table(s.budgets()).Clauses(clause.OnConflict{DoNothing: true}).Create(&budget).Error; err != nil {
+			return err
+		}
+		if err := tx.Table(s.budgets()).Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("key_hash = ?", keyHash).Take(&budget).Error; err != nil {
+			return err
+		}
+
+		var row reservationRow
+		if err := tx.Table(s.reservations()).Where("key_hash = ? AND request_hash = ?", keyHash, requestHash).
+			Find(&row).Error; err != nil {
+			return err
+		}
+
+		usage, reservation := budget.Usage, row.Reservation
+		if err := fn(&usage, &reservation); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if usage != budget.Usage {
+			// A map also writes zero values when reservations are released.
+			if err := tx.Table(s.budgets()).Where("key_hash = ?", keyHash).
+				Updates(map[string]any{"reserved": usage.Reserved, "committed": usage.Committed}).Error; err != nil {
+				return err
+			}
+		}
+		if reservation == row.Reservation {
+			return nil
+		}
+		if reservation == (quota.Reservation{}) {
+			return tx.Table(s.reservations()).Where("key_hash = ? AND request_hash = ?", keyHash, requestHash).
+				Delete(&reservationRow{}).Error
+		}
+		row = reservationRow{KeyHash: keyHash, RequestHash: requestHash, Reservation: reservation}
+		return tx.Table(s.reservations()).Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "key_hash"}, {Name: "request_hash"}},
+			DoUpdates: clause.AssignmentColumns([]string{"amount", "state"}),
+		}).Create(&row).Error
+	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 }
 
-func (s *Store) budgets() string      { return s.schema + `.usagequota_budgets` }
-func (s *Store) reservations() string { return s.schema + `.usagequota_reservations` }
-
-// Init creates the two tables if they do not exist. It does not create the
-// schema or modify existing tables. Applications may run equivalent DDL in
-// their own migration system instead.
-func (s *Store) Init(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	_, err = tx.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-		key_hash BYTEA PRIMARY KEY CHECK (octet_length(key_hash) = 32),
-		reserved BIGINT NOT NULL DEFAULT 0 CHECK (reserved >= 0),
-		committed BIGINT NOT NULL DEFAULT 0 CHECK (committed >= 0),
-		CHECK (reserved <= 9223372036854775807 - committed)
-	)`, s.budgets()))
-	if err != nil {
-		return fmt.Errorf("create budgets: %w", err)
-	}
-	_, err = tx.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-		key_hash BYTEA NOT NULL REFERENCES %s(key_hash) ON DELETE CASCADE,
-		request_hash BYTEA NOT NULL CHECK (octet_length(request_hash) = 32),
-		amount BIGINT NOT NULL CHECK (amount > 0),
-		state TEXT NOT NULL CHECK (state IN ('pending', 'committed', 'cancelled')),
-		PRIMARY KEY (key_hash, request_hash)
-	)`, s.reservations(), s.budgets()))
-	if err != nil {
-		return fmt.Errorf("create reservations: %w", err)
-	}
-	return tx.Commit()
+// Read returns a consistent usage snapshot, or zero usage for a missing key.
+func (s *Store) Read(ctx context.Context, key quota.Key) (quota.Usage, error) {
+	var row budgetRow
+	err := s.db.WithContext(ctx).Table(s.budgets()).Where("key_hash = ?", budgetDigest(key)).Find(&row).Error
+	return row.Usage, err
 }
 
 func budgetDigest(key quota.Key) []byte {
@@ -86,83 +115,4 @@ func budgetDigest(key quota.Key) []byte {
 func requestDigest(requestID string) []byte {
 	sum := sha256.Sum256([]byte(requestID))
 	return sum[:]
-}
-
-// Update locks the budget row before reading its reservation. Every writer to
-// a budget therefore sees the previous writer's committed state. The callback
-// runs inside the transaction and must not perform external side effects.
-func (s *Store) Update(ctx context.Context, key quota.Key, requestID string, fn func(*quota.Usage, *quota.Reservation) error) error {
-	keyHash, requestHash := budgetDigest(key), requestDigest(requestID)
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (key_hash) VALUES ($1)
-		ON CONFLICT (key_hash) DO NOTHING`, s.budgets()), keyHash)
-	if err != nil {
-		return err
-	}
-
-	var usage quota.Usage
-	err = tx.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT reserved, committed FROM %s
-		WHERE key_hash = $1 FOR UPDATE`, s.budgets()), keyHash).Scan(&usage.Reserved, &usage.Committed)
-	if err != nil {
-		return err
-	}
-
-	var reservation quota.Reservation
-	err = tx.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT amount, state FROM %s
-		WHERE key_hash = $1 AND request_hash = $2`, s.reservations()), keyHash, requestHash).
-		Scan(&reservation.Amount, &reservation.State)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-
-	beforeUsage, beforeReservation := usage, reservation
-	if err := fn(&usage, &reservation); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if usage != beforeUsage {
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			UPDATE %s SET reserved = $2, committed = $3
-			WHERE key_hash = $1`, s.budgets()), keyHash, usage.Reserved, usage.Committed)
-		if err != nil {
-			return err
-		}
-	}
-	if reservation != beforeReservation {
-		if reservation == (quota.Reservation{}) {
-			_, err = tx.ExecContext(ctx, fmt.Sprintf(`
-				DELETE FROM %s WHERE key_hash = $1 AND request_hash = $2`, s.reservations()), keyHash, requestHash)
-		} else {
-			_, err = tx.ExecContext(ctx, fmt.Sprintf(`
-				INSERT INTO %s (key_hash, request_hash, amount, state) VALUES ($1, $2, $3, $4)
-				ON CONFLICT (key_hash, request_hash)
-				DO UPDATE SET amount = EXCLUDED.amount, state = EXCLUDED.state`, s.reservations()),
-				keyHash, requestHash, reservation.Amount, string(reservation.State))
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-// Read returns a consistent counter snapshot, or zero usage for a missing key.
-func (s *Store) Read(ctx context.Context, key quota.Key) (quota.Usage, error) {
-	var usage quota.Usage
-	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT reserved, committed FROM %s WHERE key_hash = $1`, s.budgets()), budgetDigest(key)).
-		Scan(&usage.Reserved, &usage.Committed)
-	if errors.Is(err, sql.ErrNoRows) {
-		return quota.Usage{}, nil
-	}
-	return usage, err
 }
