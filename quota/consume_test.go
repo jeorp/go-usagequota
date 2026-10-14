@@ -35,6 +35,16 @@ func TestConsume(t *testing.T) {
 			if got != tc.want || !errors.Is(err, tc.err) {
 				t.Fatalf("Consume = %d, %v; want %d, %v", got, err, tc.want, tc.err)
 			}
+			if tc.err == quota.ErrExceeded {
+				var detail *quota.ExceededError
+				if !errors.As(err, &detail) {
+					t.Fatalf("missing exceeded details: %v", err)
+				}
+				remaining := max(int64(0), tc.limit-tc.used)
+				if detail.Limit != tc.limit || detail.Used != tc.used || detail.Amount != tc.amount || detail.Remaining() != remaining {
+					t.Fatalf("exceeded details = %+v, remaining = %d", detail, detail.Remaining())
+				}
+			}
 		})
 	}
 }

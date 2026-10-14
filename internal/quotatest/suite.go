@@ -23,6 +23,8 @@ func Key() quota.Key {
 func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 	t.Helper()
 	t.Run("spend", func(t *testing.T) { runSpend(t, factory) })
+	t.Run("reservation_reads", func(t *testing.T) { runReservationReads(t, factory) })
+	t.Run("exceeded_details", func(t *testing.T) { runExceededDetails(t, factory) })
 	ctx := context.Background()
 	newLimiter := func(store quota.Store) *quota.Limiter {
 		return quota.New(store, quota.WithClock(func() time.Time { return Now }))

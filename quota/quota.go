@@ -19,6 +19,7 @@ var (
 	ErrFinalized     = errors.New("quota: incompatible terminal state")
 	ErrOutsidePeriod = errors.New("quota: outside period")
 	ErrCorrupt       = errors.New("quota: invalid stored state")
+	ErrUnsupported   = errors.New("quota: operation not supported by store")
 )
 
 // Key identifies an independent budget. Subject may be a user or tenant ID;
@@ -107,6 +108,7 @@ type SpendResult struct {
 //
 // Read returns a consistent usage snapshot, or zero usage for a missing key.
 // Implementations must honor context cancellation and preserve wrapped errors.
+// Implement ReservationReader as well to support reservation lookups.
 type Store interface {
 	Update(ctx context.Context, key Key, requestID string, fn func(*Usage, *Reservation) error) error
 	Read(ctx context.Context, key Key) (Usage, error)
@@ -289,25 +291,21 @@ func validate(usage Usage, reservation Reservation) error {
 	if !usage.valid() {
 		return ErrCorrupt
 	}
+	if reservation == (Reservation{}) {
+		return nil
+	}
+	if !reservation.valid() {
+		return ErrCorrupt
+	}
 	switch reservation.State {
-	case "":
-		if reservation.Amount != 0 {
-			return ErrCorrupt
-		}
 	case Pending:
-		if reservation.Amount <= 0 || reservation.Amount > usage.Reserved {
+		if reservation.Amount > usage.Reserved {
 			return ErrCorrupt
 		}
 	case Committed:
-		if reservation.Amount <= 0 || reservation.Amount > usage.Committed {
+		if reservation.Amount > usage.Committed {
 			return ErrCorrupt
 		}
-	case Cancelled:
-		if reservation.Amount <= 0 {
-			return ErrCorrupt
-		}
-	default:
-		return ErrCorrupt
 	}
 	return nil
 }

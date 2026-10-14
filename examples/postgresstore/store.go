@@ -17,6 +17,9 @@ type Store struct {
 	db *gorm.DB
 }
 
+var _ quota.Store = (*Store)(nil)
+var _ quota.ReservationReader = (*Store)(nil)
+
 type quotaBudget struct {
 	Key         string `gorm:"primaryKey"`
 	quota.Usage `gorm:"embedded"`
@@ -77,6 +80,19 @@ func (s *Store) Read(ctx context.Context, key quota.Key) (quota.Usage, error) {
 	err := s.db.WithContext(ctx).Select("reserved", "committed").
 		Where("key = ?", budgetKey(key)).Find(&row).Error
 	return row.Usage, err
+}
+
+// ReadReservation returns a snapshot without creating or updating any records.
+func (s *Store) ReadReservation(ctx context.Context, key quota.Key, requestID string) (quota.Reservation, error) {
+	var row quotaReservation
+	result := s.db.WithContext(ctx).Where("budget_key = ? AND request_id = ?", budgetKey(key), []byte(requestID)).Find(&row)
+	if result.Error != nil {
+		return quota.Reservation{}, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return quota.Reservation{}, quota.ErrNotFound
+	}
+	return row.Reservation, nil
 }
 
 func budgetKey(key quota.Key) string {

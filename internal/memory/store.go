@@ -21,6 +21,7 @@ type Store struct {
 }
 
 var _ quota.Store = (*Store)(nil)
+var _ quota.ReservationReader = (*Store)(nil)
 
 func New() *Store {
 	return &Store{gate: make(chan struct{}, 1), buckets: make(map[quota.Key]bucket)}
@@ -71,4 +72,16 @@ func (s *Store) Read(ctx context.Context, key quota.Key) (quota.Usage, error) {
 	}
 	defer func() { <-s.gate }()
 	return s.buckets[key.Canonical()].usage, nil
+}
+
+func (s *Store) ReadReservation(ctx context.Context, key quota.Key, requestID string) (quota.Reservation, error) {
+	if err := s.lock(ctx); err != nil {
+		return quota.Reservation{}, err
+	}
+	defer func() { <-s.gate }()
+	reservation, ok := s.buckets[key.Canonical()].reservations[requestID]
+	if !ok {
+		return quota.Reservation{}, quota.ErrNotFound
+	}
+	return reservation, nil
 }

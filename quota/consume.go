@@ -6,7 +6,8 @@ package quota
 //
 // The caller must read the counter, call Consume, and save it in one transaction.
 // Retries of completed requests count again, and failed work is not refunded.
-// Use Limiter for deduplication or cancellation.
+// Use Limiter for deduplication or cancellation. A rejected amount returns an
+// *ExceededError that wraps ErrExceeded and reports the admission inputs.
 func Consume(used, amount, limit int64) (int64, error) {
 	if amount <= 0 || limit < 0 {
 		return used, ErrInvalid
@@ -16,7 +17,7 @@ func Consume(used, amount, limit int64) (int64, error) {
 	}
 	// Compare by subtraction to avoid overflowing used + amount.
 	if used > limit || amount > limit-used {
-		return used, ErrExceeded
+		return used, &ExceededError{Limit: limit, Used: used, Amount: amount}
 	}
 	return used + amount, nil
 }

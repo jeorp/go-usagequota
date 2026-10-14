@@ -90,6 +90,22 @@ Keep the original key, including its period. `Commit` and `Cancel` work after th
 
 Pending reservations do not expire and keep counting against their original period; reconcile them in your application. `Cancel` releases pending usage, but cancelled IDs stay closed. Committed usage cannot be refunded, and reservation records are not deleted automatically.
 
+### Inspecting a reservation
+
+Use the original key and request ID to read the amount and state, including after the period ends:
+
+```go
+reservation, err := limiter.Reservation(ctx, key, requestID)
+if err != nil {
+	return err
+}
+fmt.Printf("state=%s amount=%d\n", reservation.State, reservation.Amount)
+```
+
+The lookup does not create records or change usage. It returns `ErrNotFound` for an unknown key or request ID and can also inspect charges created by `Spend`. A snapshot may change immediately after the read; it does not establish whether application work ran or grant permission to start it.
+
+The bundled stores implement `quota.ReservationReader`. Custom stores can add `ReadReservation` to support this API; existing stores still support all previous operations, but lookups return `ErrUnsupported` until they implement it.
+
 ### Errors that need a decision
 
 Use `errors.Is` to inspect errors, including wrapped store errors. These errors need a change in input, quota, or state before a retry can succeed:
@@ -98,9 +114,26 @@ Use `errors.Is` to inspect errors, including wrapped store errors. These errors 
 - `ErrExceeded`: the requested amount does not fit within the limit. Wait for capacity or a limit change before trying again.
 - `ErrOutsidePeriod`: the original period is not active for a new charge or reservation.
 - `ErrConflict`: the request ID already exists with a different amount.
-- `ErrNotFound`: `Commit` or `Cancel` has no matching reservation.
+- `ErrNotFound`: `Reservation`, `Commit`, or `Cancel` has no matching reservation.
 - `ErrFinalized`: the requested operation conflicts with a committed or cancelled state.
 - `ErrCorrupt`: stored counters or reservation state are invalid and need investigation.
+- `ErrUnsupported`: the store needs to implement `ReservationReader` for lookups.
+
+`Consume`, `Reserve`, and `Spend` return a `*quota.ExceededError` when the amount does not fit. `errors.Is(err, quota.ErrExceeded)` still classifies it; use `errors.As` for details, including through wrapped errors:
+
+```go
+_, err := limiter.Spend(ctx, key, requestID, amount, limit)
+var exceeded *quota.ExceededError
+if errors.As(err, &exceeded) {
+	fmt.Printf("limit=%d used=%d requested=%d remaining=%d\n",
+		exceeded.Limit, exceeded.Used, exceeded.Amount, exceeded.Remaining())
+}
+if err != nil {
+	return err
+}
+```
+
+`Used` includes pending and committed usage for `Reserve` and `Spend`; `Remaining()` clamps to zero when the limit is below existing usage. The values come from the rejected admission check, before adding the requested amount. They are useful for display and logs, but do not promise capacity for a later request.
 
 ## Stores
 

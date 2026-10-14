@@ -86,6 +86,37 @@ func TestContract(t *testing.T) {
 	quotatest.Run(t, func(t *testing.T) quota.Store { return testStore(t) })
 }
 
+func TestReservationLookupInReadOnlyTransaction(t *testing.T) {
+	store := testStore(t)
+	ctx, key := context.Background(), quotatest.Key()
+	l := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
+	if _, err := l.Reserve(ctx, key, "existing", 2, 3); err != nil {
+		t.Fatal(err)
+	}
+	err := store.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SET TRANSACTION READ ONLY").Error; err != nil {
+			return err
+		}
+		reader := quota.New(New(tx))
+		r, err := reader.Reservation(ctx, key, "existing")
+		if err != nil || r != (quota.Reservation{Amount: 2, State: quota.Pending}) {
+			return fmt.Errorf("read-only lookup = %+v, %v", r, err)
+		}
+		if _, err := reader.Reservation(ctx, key, "missing"); !errors.Is(err, quota.ErrNotFound) {
+			return fmt.Errorf("missing reservation = %v", err)
+		}
+		missingKey := key
+		missingKey.Subject = "missing"
+		if _, err := reader.Reservation(ctx, missingKey, "existing"); !errors.Is(err, quota.ErrNotFound) {
+			return fmt.Errorf("missing budget = %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestIndependentClientsShareBudget(t *testing.T) {
 	store := testStore(t)
 	db := testDB(t, store.db.NamingStrategy)
