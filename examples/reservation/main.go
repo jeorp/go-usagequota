@@ -1,4 +1,5 @@
-// This example shows how to reserve, cancel, and commit usage.
+// This example shows that retries share a reservation, cancellation restores
+// capacity, and completed work remains charged against the limit.
 package main
 
 import (
@@ -25,33 +26,32 @@ func main() {
 	const firstRequest = "request-1"
 	const secondRequest = "request-2"
 
-	// Reserve the only available unit for the first request.
 	first, err := limiter.Reserve(ctx, key, firstRequest, 1, limit)
 	check(err)
 	fmt.Printf("first request: new reservation = %t\n", first.Created)
 
-	// A retry with the same request ID uses the existing reservation.
+	// The same request ID prevents a retry from starting duplicate work.
 	retry, err := limiter.Reserve(ctx, key, firstRequest, 1, limit)
 	check(err)
 	fmt.Printf("retry: new reservation = %t\n", retry.Created)
 
-	// The second request cannot start while the first holds the unit.
+	// Pending work counts against the limit, so another request is denied.
 	_, err = limiter.Reserve(ctx, key, secondRequest, 1, limit)
 	if !errors.Is(err, quota.ErrExceeded) {
 		log.Fatalf("expected limit error, got %v", err)
 	}
 	fmt.Println("second request: limit exceeded")
 
-	// The first request did not run, so release its reserved unit.
+	// Cancellation is safe here because the first request never ran.
 	check(limiter.Cancel(ctx, key, firstRequest))
 	fmt.Println("first request: cancelled")
 
-	// The second request can now reserve the unit.
+	// The freed unit can serve another request.
 	second, err := limiter.Reserve(ctx, key, secondRequest, 1, limit)
 	check(err)
 	if second.Created {
-		// Only a new reservation starts work. This demo has no external work;
-		// a real caller would commit only after its work succeeds.
+		// Only a new reservation should start work. This demo has no external
+		// work; a real caller would commit only after its work succeeds.
 		check(limiter.Commit(ctx, key, secondRequest))
 		fmt.Println("second request: committed")
 	}

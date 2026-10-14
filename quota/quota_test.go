@@ -54,12 +54,13 @@ func (s fakeStore) Update(_ context.Context, _ quota.Key, _ string, fn func(*quo
 func (s fakeStore) Read(context.Context, quota.Key) (quota.Usage, error) { return s.usage, s.err }
 
 func TestRetryDoesNotLeakCreatedResult(t *testing.T) {
+	// If a transaction retries after another writer wins, the caller must
+	// observe a replay rather than permission to start work.
 	store := fakeStore{update: func(fn func(*quota.Usage, *quota.Reservation) error) error {
 		u, r := quota.Usage{}, quota.Reservation{}
 		if err := fn(&u, &r); err != nil {
 			return err
 		}
-		// Another transaction won; the next attempt sees its reservation.
 		return fn(&u, &r)
 	}}
 	l := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
@@ -70,6 +71,7 @@ func TestRetryDoesNotLeakCreatedResult(t *testing.T) {
 }
 
 func TestTransactionRetryRechecksClock(t *testing.T) {
+	// A retry after expiry must not admit work based on the first attempt's time.
 	at, key := quotatest.Now, quotatest.Key()
 	store := fakeStore{update: func(fn func(*quota.Usage, *quota.Reservation) error) error {
 		if err := fn(&quota.Usage{}, &quota.Reservation{}); err != nil {
@@ -124,7 +126,8 @@ func FuzzAccounting(f *testing.F) {
 		l := quota.New(memory.New(), quota.WithClock(func() time.Time { return quotatest.Now }))
 		ctx, key := context.Background(), quotatest.Key()
 		states := map[string]quota.State{}
-		// Each byte selects one of eight request IDs and an operation.
+		// Compare arbitrary operation sequences across eight request IDs with
+		// an independent model of the expected reservation states.
 		for step, op := range operations {
 			id := string(rune('a' + (op/3)%8))
 			var wantErr, gotErr error
