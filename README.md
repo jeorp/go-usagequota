@@ -15,6 +15,7 @@ Use `quota.Month`, `quota.Day`, or a custom `quota.Period` to scope a budget to 
 | Retries | No built-in deduplication | The same request ID does not reserve twice; repeating `Commit` is safe |
 
 For example, use `Consume` for a daily draft-generation attempt limit and `Reserve` → `Commit` for a monthly completed-review limit.
+Pending reservations and committed usage both count against the limit.
 
 ## Stores
 
@@ -30,6 +31,8 @@ go get github.com/jeorp/go-usagequota@latest
 
 See [the runnable reservation example](examples/reservation/main.go) for `Reserve`, `Commit`, and `Cancel`. `Created` indicates a new reservation; the caller remains responsible for running and recovering the job. Cancel only when work definitely did not run.
 
+Keep the original budget key and reservation records for retries. The library does not expire reservations or delete old records automatically.
+
 ## Check the project
 
 ```sh
@@ -39,5 +42,3 @@ make postgres-up
 make integration
 make postgres-down
 ```
-
-See [design notes](docs/design.md) for guarantees and storage limits.

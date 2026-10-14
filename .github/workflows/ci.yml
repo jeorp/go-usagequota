@@ -40,3 +40,17 @@ jobs:
       - name: Stop PostgreSQL
         if: always()
         run: make postgres-down
+
+  vulnerability:
+    name: Vulnerability scan (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ['.', 'examples/postgresstore']
+    steps:
+      - uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: '1.26.x'
+          work-dir: ${{ matrix.module }}
+          cache: false
