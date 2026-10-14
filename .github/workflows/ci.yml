@@ -8,6 +8,24 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ['.', 'examples/postgresstore']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          working-directory: ${{ matrix.module }}
+
   test:
     runs-on: ubuntu-latest
     steps:

@@ -1,4 +1,4 @@
-.PHONY: test test-core vet demo fuzz integration postgres-up postgres-down fmt
+.PHONY: test test-core vet lint demo fuzz integration postgres-up postgres-down fmt
 
 test:
 	go test -race ./...
@@ -9,6 +9,10 @@ test-core:
 vet:
 	go vet ./...
 	cd examples/postgresstore && go vet ./...
+
+lint:
+	golangci-lint run ./...
+	cd examples/postgresstore && golangci-lint run ./...
 
 demo:
 	go run ./examples/reservation

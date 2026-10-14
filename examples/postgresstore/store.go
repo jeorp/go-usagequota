@@ -48,7 +48,7 @@ func (s *Store) Init(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 		key_hash BYTEA PRIMARY KEY CHECK (octet_length(key_hash) = 32),
 		reserved BIGINT NOT NULL DEFAULT 0 CHECK (reserved >= 0),
@@ -93,7 +93,7 @@ func (s *Store) Update(ctx context.Context, key quota.Key, requestID string, fn 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (key_hash) VALUES ($1) ON CONFLICT (key_hash) DO NOTHING`, s.budgets()), keyHash); err != nil {
 		return err
 	}

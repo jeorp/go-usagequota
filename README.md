@@ -4,18 +4,19 @@ A Go library for usage limits that remain consistent under concurrent requests a
 
 Use `quota.Month`, `quota.Day`, or a custom `quota.Period` to scope a budget to an account and resource.
 
-## Consume vs. Reserve and Commit
+## Choose how to count usage
 
-`Commit` completes an earlier `Reserve`; it is not a standalone way to charge usage.
+Use `Consume` when **each attempt counts**, even if the work later fails. For example, count each time a user starts an API request. `Consume` calculates the new count; your code must read and save the counter in one transaction. Retrying a completed request counts again.
 
-| | `Consume` | `Reserve` → `Commit` |
-| --- | --- | --- |
-| Use when | Every attempt counts, even if later work fails | Only completed work should count, but work in progress must hold capacity |
-| Flow | Calculate the next counter value and save it in the caller's transaction | Reserve before work, commit after confirmed success, or cancel if work definitely did not run |
-| Retries | No built-in deduplication | The same request ID does not reserve twice; repeating `Commit` is safe |
+Use `Reserve` → `Commit` when work has separate start and completion steps:
 
-For example, use `Consume` for a daily draft-generation attempt limit and `Reserve` → `Commit` for a monthly completed-review limit.
-Pending reservations and committed usage both count against the limit.
+1. Call `Reserve` before starting the work.
+2. Call `Commit` after the work succeeds.
+3. Call `Cancel` only if you are sure the work did not run.
+
+Both reserved and completed work count toward the limit. Use the same request ID when retrying: `Reserve` will not create a second reservation, and calling `Commit` again is safe. `Commit` requires an earlier `Reserve`.
+
+You can use either approach with a daily, monthly, or custom period.
 
 ## Stores
 
@@ -38,6 +39,7 @@ Keep the original budget key and reservation records for retries. The library do
 ```sh
 make test
 make vet
+make lint
 make postgres-up
 make integration
 make postgres-down
