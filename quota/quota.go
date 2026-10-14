@@ -39,7 +39,9 @@ func (k Key) Canonical() Key {
 }
 
 func (k Key) valid() bool {
-	return k.Subject != "" && k.Resource != "" && utf8.ValidString(k.Subject) && utf8.ValidString(k.Resource) && k.Period.valid()
+	return k.Subject != "" && utf8.ValidString(k.Subject) &&
+		k.Resource != "" && utf8.ValidString(k.Resource) &&
+		k.Period.valid()
 }
 
 // Usage includes pending reservations in the amount charged against the limit.
@@ -53,10 +55,15 @@ func (u Usage) Total() int64 { return u.Reserved + u.Committed }
 
 // Remaining clamps at zero if a caller lowers its limit below existing usage.
 func (u Usage) Remaining(limit int64) int64 {
-	if limit <= u.Total() {
+	total := u.Total()
+	if limit <= total {
 		return 0
 	}
-	return limit - u.Total()
+	return limit - total
+}
+
+func (u Usage) valid() bool {
+	return u.Reserved >= 0 && u.Committed >= 0 && u.Reserved <= math.MaxInt64-u.Committed
 }
 
 // State is a reservation's lifecycle state. The empty state means absent.
@@ -141,7 +148,7 @@ func (l *Limiter) Reserve(ctx context.Context, key Key, requestID string, amount
 	}
 	var result Result
 	err := l.store.Update(ctx, key.Canonical(), requestID, func(usage *Usage, reservation *Reservation) error {
-		if err := validate(usage, reservation); err != nil {
+		if err := validate(*usage, *reservation); err != nil {
 			return err
 		}
 		if reservation.State != "" {
@@ -189,7 +196,7 @@ func (l *Limiter) finalize(ctx context.Context, key Key, requestID string, state
 		return ErrInvalid
 	}
 	err := l.store.Update(ctx, key.Canonical(), requestID, func(usage *Usage, reservation *Reservation) error {
-		if err := validate(usage, reservation); err != nil {
+		if err := validate(*usage, *reservation); err != nil {
 			return err
 		}
 		if reservation.State == "" {
@@ -223,31 +230,31 @@ func (l *Limiter) Usage(ctx context.Context, key Key) (Usage, error) {
 	if err != nil {
 		return Usage{}, fmt.Errorf("usage: %w", err)
 	}
-	if err := validate(&usage, &Reservation{}); err != nil {
-		return Usage{}, err
+	if !usage.valid() {
+		return Usage{}, ErrCorrupt
 	}
 	return usage, nil
 }
 
-func validate(u *Usage, r *Reservation) error {
-	if u.Reserved < 0 || u.Committed < 0 || u.Reserved > math.MaxInt64-u.Committed {
+func validate(usage Usage, reservation Reservation) error {
+	if !usage.valid() {
 		return ErrCorrupt
 	}
-	switch r.State {
+	switch reservation.State {
 	case "":
-		if r.Amount != 0 {
+		if reservation.Amount != 0 {
 			return ErrCorrupt
 		}
 	case Pending:
-		if r.Amount <= 0 || r.Amount > u.Reserved {
+		if reservation.Amount <= 0 || reservation.Amount > usage.Reserved {
 			return ErrCorrupt
 		}
 	case Committed:
-		if r.Amount <= 0 || r.Amount > u.Committed {
+		if reservation.Amount <= 0 || reservation.Amount > usage.Committed {
 			return ErrCorrupt
 		}
 	case Cancelled:
-		if r.Amount <= 0 {
+		if reservation.Amount <= 0 {
 			return ErrCorrupt
 		}
 	default:

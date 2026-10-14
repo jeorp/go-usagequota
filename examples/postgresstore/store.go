@@ -73,8 +73,12 @@ func (s *Store) Init(ctx context.Context) error {
 
 func budgetDigest(key quota.Key) []byte {
 	key = key.Canonical()
-	identity, _ := json.Marshal([4]string{key.Subject, key.Resource,
-		key.Period.Start.Format(time.RFC3339Nano), key.Period.End.Format(time.RFC3339Nano)})
+	identity, _ := json.Marshal([4]string{
+		key.Subject,
+		key.Resource,
+		key.Period.Start.Format(time.RFC3339Nano),
+		key.Period.End.Format(time.RFC3339Nano),
+	})
 	sum := sha256.Sum256(identity)
 	return sum[:]
 }
@@ -94,22 +98,30 @@ func (s *Store) Update(ctx context.Context, key quota.Key, requestID string, fn 
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (key_hash) VALUES ($1) ON CONFLICT (key_hash) DO NOTHING`, s.budgets()), keyHash); err != nil {
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO %s (key_hash) VALUES ($1)
+		ON CONFLICT (key_hash) DO NOTHING`, s.budgets()), keyHash)
+	if err != nil {
 		return err
 	}
+
 	var usage quota.Usage
-	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT reserved, committed FROM %s WHERE key_hash = $1 FOR UPDATE`, s.budgets()), keyHash).Scan(&usage.Reserved, &usage.Committed); err != nil {
+	err = tx.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT reserved, committed FROM %s
+		WHERE key_hash = $1 FOR UPDATE`, s.budgets()), keyHash).Scan(&usage.Reserved, &usage.Committed)
+	if err != nil {
 		return err
 	}
+
 	var reservation quota.Reservation
-	var state string
-	err = tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT amount, state FROM %s WHERE key_hash = $1 AND request_hash = $2`, s.reservations()), keyHash, requestHash).Scan(&reservation.Amount, &state)
+	err = tx.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT amount, state FROM %s
+		WHERE key_hash = $1 AND request_hash = $2`, s.reservations()), keyHash, requestHash).
+		Scan(&reservation.Amount, &reservation.State)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if err == nil {
-		reservation.State = quota.State(state)
-	}
+
 	beforeUsage, beforeReservation := usage, reservation
 	if err := fn(&usage, &reservation); err != nil {
 		return err
@@ -117,26 +129,27 @@ func (s *Store) Update(ctx context.Context, key quota.Key, requestID string, fn 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if usage == beforeUsage && reservation == beforeReservation {
-		return tx.Commit()
-	}
 	if usage != beforeUsage {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET reserved = $2, committed = $3 WHERE key_hash = $1`, s.budgets()), keyHash, usage.Reserved, usage.Committed); err != nil {
+		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+			UPDATE %s SET reserved = $2, committed = $3
+			WHERE key_hash = $1`, s.budgets()), keyHash, usage.Reserved, usage.Committed)
+		if err != nil {
 			return err
 		}
 	}
 	if reservation != beforeReservation {
 		if reservation == (quota.Reservation{}) {
-			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE key_hash = $1 AND request_hash = $2`, s.reservations()), keyHash, requestHash); err != nil {
-				return err
-			}
+			_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+				DELETE FROM %s WHERE key_hash = $1 AND request_hash = $2`, s.reservations()), keyHash, requestHash)
 		} else {
-			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (key_hash, request_hash, amount, state)
-				VALUES ($1, $2, $3, $4) ON CONFLICT (key_hash, request_hash)
+			_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+				INSERT INTO %s (key_hash, request_hash, amount, state) VALUES ($1, $2, $3, $4)
+				ON CONFLICT (key_hash, request_hash)
 				DO UPDATE SET amount = EXCLUDED.amount, state = EXCLUDED.state`, s.reservations()),
-				keyHash, requestHash, reservation.Amount, string(reservation.State)); err != nil {
-				return err
-			}
+				keyHash, requestHash, reservation.Amount, string(reservation.State))
+		}
+		if err != nil {
+			return err
 		}
 	}
 	return tx.Commit()
@@ -145,7 +158,9 @@ func (s *Store) Update(ctx context.Context, key quota.Key, requestID string, fn 
 // Read returns a consistent counter snapshot, or zero usage for a missing key.
 func (s *Store) Read(ctx context.Context, key quota.Key) (quota.Usage, error) {
 	var usage quota.Usage
-	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT reserved, committed FROM %s WHERE key_hash = $1`, s.budgets()), budgetDigest(key)).Scan(&usage.Reserved, &usage.Committed)
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT reserved, committed FROM %s WHERE key_hash = $1`, s.budgets()), budgetDigest(key)).
+		Scan(&usage.Reserved, &usage.Committed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return quota.Usage{}, nil
 	}

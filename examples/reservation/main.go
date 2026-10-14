@@ -15,12 +15,12 @@ import (
 
 func main() {
 	ctx := context.Background()
-	demoTime := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
-	limiter := quota.New(memory.New(), quota.WithClock(func() time.Time { return demoTime }))
+	now := time.Now()
+	limiter := quota.New(memory.New(), quota.WithClock(func() time.Time { return now }))
 	key := quota.Key{
 		Subject:  "user-123",
 		Resource: "reviews",
-		Period:   quota.Month(demoTime),
+		Period:   quota.Month(now),
 	}
 	const limit int64 = 1
 	const firstRequest = "request-1"
@@ -46,12 +46,10 @@ func main() {
 	check(limiter.Cancel(ctx, key, firstRequest))
 	fmt.Println("first request: cancelled")
 
-	// The freed unit can serve another request.
 	second, err := limiter.Reserve(ctx, key, secondRequest, 1, limit)
 	check(err)
 	if second.Created {
-		// Only a new reservation should start work. This demo has no external
-		// work; a real caller would commit only after its work succeeds.
+		// Run the work here, then commit after it succeeds.
 		check(limiter.Commit(ctx, key, secondRequest))
 		fmt.Println("second request: committed")
 	}

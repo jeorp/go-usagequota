@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,8 +27,6 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 		return quota.New(store, quota.WithClock(func() time.Time { return Now }))
 	}
 	t.Run("reserve_and_replay", func(t *testing.T) {
-		// A denied request must leave no reservation, while an accepted ID
-		// remains reusable for retries even if the limit later decreases.
 		l, key := newLimiter(factory(t)), Key()
 		wantUsage(t, l, key, 0, 0)
 		result, err := l.Reserve(ctx, key, "request/1", 7, 10)
@@ -53,7 +50,6 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 		wantUsage(t, l, key, 10, 0)
 	})
 	t.Run("commit_and_replay", func(t *testing.T) {
-		// Committed usage remains charged, and a retry must not run work again.
 		l, key := newLimiter(factory(t)), Key()
 		if _, err := l.Reserve(ctx, key, "request/1", 7, 10); err != nil {
 			t.Fatal(err)
@@ -77,7 +73,6 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 		wantUsage(t, l, key, 3, 7)
 	})
 	t.Run("cancel_and_missing_requests", func(t *testing.T) {
-		// Cancellation frees capacity but permanently closes that request ID.
 		l, key := newLimiter(factory(t)), Key()
 		if _, err := l.Reserve(ctx, key, "request/2", 3, 10); err != nil {
 			t.Fatal(err)
@@ -106,7 +101,6 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 		wantUsage(t, l, key, 10, 0)
 	})
 	t.Run("one_slot_100_contenders", func(t *testing.T) {
-		// Separate clients sharing a store must admit only one request.
 		store, key := factory(t), Key()
 		var accepted atomic.Int64
 		parallel(t, 100, func(i int) error {
@@ -125,7 +119,6 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 		wantUsage(t, newLimiter(store), key, 1, 0)
 	})
 	t.Run("same_request_100_contenders", func(t *testing.T) {
-		// Racing retries must share one reservation and one unit of usage.
 		store, key := factory(t), Key()
 		var created atomic.Int64
 		parallel(t, 100, func(_ int) error {
@@ -141,7 +134,6 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 		wantUsage(t, newLimiter(store), key, 1, 0)
 	})
 	t.Run("commit_cancel_race", func(t *testing.T) {
-		// Only one terminal outcome may win; accounting must match that outcome.
 		l, key := newLimiter(factory(t)), Key()
 		if _, err := l.Reserve(ctx, key, "race", 1, 1); err != nil {
 			t.Fatal(err)
@@ -171,7 +163,6 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 		}
 	})
 	t.Run("period_boundary_and_late_finalization", func(t *testing.T) {
-		// New work stops at the period end, but admitted work can finish later.
 		store, key := factory(t), Key()
 		at := key.Period.Start.Add(-time.Nanosecond)
 		l := quota.New(store, quota.WithClock(func() time.Time { return at }))
@@ -203,7 +194,6 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 		wantUsage(t, l, next, 0, 0)
 	})
 	t.Run("isolation_and_canonical_time", func(t *testing.T) {
-		// Key fields isolate budgets, while time zones do not change identity.
 		l, key := newLimiter(factory(t)), Key()
 		keys := []quota.Key{key, key, key, key}
 		keys[1].Subject = "another"
@@ -238,7 +228,6 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 		wantUsage(t, l, key, 0, math.MaxInt64)
 	})
 	t.Run("callback_rollback", func(t *testing.T) {
-		// A failed update must leave both usage and the reservation intact.
 		store, key := factory(t), Key()
 		l := newLimiter(store)
 		if _, err := l.Reserve(ctx, key, "id", 1, 2); err != nil {
@@ -283,22 +272,17 @@ func wantUsage(t *testing.T, l *quota.Limiter, key quota.Key, reserved, committe
 
 func parallel(t *testing.T, count int, fn func(int) error) {
 	t.Helper()
-	var wg sync.WaitGroup
 	start := make(chan struct{})
 	results := make(chan error, count)
 	for i := 0; i < count; i++ {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			<-start
 			results <- fn(i)
 		}()
 	}
 	close(start)
-	wg.Wait()
-	close(results)
-	for err := range results {
-		if err != nil {
+	for i := 0; i < count; i++ {
+		if err := <-results; err != nil {
 			t.Error(err)
 		}
 	}

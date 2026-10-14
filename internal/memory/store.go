@@ -44,19 +44,21 @@ func (s *Store) Update(ctx context.Context, key quota.Key, requestID string, fn 
 	}
 	defer func() { <-s.gate }()
 	key = key.Canonical()
-	b := s.buckets[key]
-	u, r := b.usage, b.reservations[requestID]
-	if err := fn(&u, &r); err != nil {
+	bucket := s.buckets[key]
+	usage := bucket.usage
+	reservation := bucket.reservations[requestID]
+	if err := fn(&usage, &reservation); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if b.reservations == nil {
-		b.reservations = make(map[string]quota.Reservation)
+	if bucket.reservations == nil {
+		bucket.reservations = make(map[string]quota.Reservation)
 	}
-	b.usage, b.reservations[requestID] = u, r
-	s.buckets[key] = b
+	bucket.usage = usage
+	bucket.reservations[requestID] = reservation
+	s.buckets[key] = bucket
 	return nil
 }
 

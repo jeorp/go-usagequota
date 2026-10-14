@@ -1,14 +1,12 @@
 package quota
 
-// Consume checks a finite limit and returns the counter after consuming amount.
-// On failure it returns used unchanged. Zero limit denies consumption; negative
-// limits and nonpositive amounts are invalid. Negative stored usage is corrupt.
+// Consume adds amount to used if the result fits within limit. On failure it
+// returns used unchanged. Zero limit denies consumption; negative limits and
+// nonpositive amounts are invalid. Negative stored usage is corrupt.
 //
-// This is a pure calculation, not a storage operation. The caller must read the
-// counter, call Consume, and persist the result in the same transaction. It is
-// suitable for attempt budgets that stay consumed even when later work fails.
-// Repeating a committed transaction consumes again: this API does not deduplicate
-// requests or provide refunds. Use Limiter for idempotent reservations instead.
+// The caller must read the counter, call Consume, and save it in one transaction.
+// Retries of completed requests count again, and failed work is not refunded.
+// Use Limiter for deduplication or cancellation.
 func Consume(used, amount, limit int64) (int64, error) {
 	if amount <= 0 || limit < 0 {
 		return used, ErrInvalid
@@ -16,8 +14,7 @@ func Consume(used, amount, limit int64) (int64, error) {
 	if used < 0 {
 		return used, ErrCorrupt
 	}
-	// Subtract only after checking used <= limit, avoiding integer overflow even
-	// when used or amount is MaxInt64.
+	// Compare by subtraction to avoid overflowing used + amount.
 	if used > limit || amount > limit-used {
 		return used, ErrExceeded
 	}
