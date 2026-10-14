@@ -94,6 +94,8 @@ type Result struct {
 //
 // Update supplies isolated copies (zero values if absent), and atomically saves
 // both only when fn returns nil. A callback error must leave storage unchanged.
+// A successful callback must leave a nonzero reservation; stores reject an
+// empty reservation with ErrInvalid so a request ID cannot be reused.
 // The callback may be retried; it must not perform external side effects. The
 // store must not retain or expose the pointers passed to the callback.
 //

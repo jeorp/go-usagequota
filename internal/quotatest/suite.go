@@ -248,6 +248,30 @@ func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 		}
 		wantUsage(t, l, key, 0, 1)
 	})
+	t.Run("empty_reservation_rejected", func(t *testing.T) {
+		store, key := factory(t), Key()
+		l := newLimiter(store)
+		if _, err := l.Reserve(ctx, key, "id", 1, 2); err != nil {
+			t.Fatal(err)
+		}
+		err := store.Update(ctx, key, "id", func(u *quota.Usage, r *quota.Reservation) error {
+			u.Reserved -= r.Amount
+			*r = quota.Reservation{}
+			return nil
+		})
+		if !errors.Is(err, quota.ErrInvalid) {
+			t.Fatalf("clear reservation = %v, want ErrInvalid", err)
+		}
+		wantUsage(t, l, key, 1, 0)
+		result, err := l.Reserve(ctx, key, "id", 1, 2)
+		if err != nil || result.Created {
+			t.Fatalf("reservation after rejected clear = %+v, %v", result, err)
+		}
+		err = store.Update(ctx, key, "missing", func(*quota.Usage, *quota.Reservation) error { return nil })
+		if !errors.Is(err, quota.ErrInvalid) {
+			t.Fatalf("empty new reservation = %v, want ErrInvalid", err)
+		}
+	})
 	t.Run("cancelled_context", func(t *testing.T) {
 		l, key := newLimiter(factory(t)), Key()
 		cancelled, cancel := context.WithCancel(ctx)

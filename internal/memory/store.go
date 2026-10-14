@@ -53,6 +53,9 @@ func (s *Store) Update(ctx context.Context, key quota.Key, requestID string, fn 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if reservation == (quota.Reservation{}) {
+		return quota.ErrInvalid
+	}
 	if bucket.reservations == nil {
 		bucket.reservations = make(map[string]quota.Reservation)
 	}

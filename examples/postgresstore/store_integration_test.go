@@ -157,32 +157,6 @@ func TestReservationSaveErrorRollsBackBudget(t *testing.T) {
 	}
 }
 
-func TestUpdateClearsReservation(t *testing.T) {
-	store := testStore(t)
-	ctx, key := context.Background(), quotatest.Key()
-	limiter := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
-	for _, id := range []string{"remove", "keep"} {
-		if _, err := limiter.Reserve(ctx, key, id, 1, 2); err != nil {
-			t.Fatal(err)
-		}
-	}
-	err := store.Update(ctx, key, "remove", func(usage *quota.Usage, reservation *quota.Reservation) error {
-		usage.Reserved -= reservation.Amount
-		*reservation = quota.Reservation{}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := limiter.Reserve(ctx, key, "remove", 1, 2)
-	if err != nil || !result.Created {
-		t.Fatalf("reserve after deletion = %+v, %v", result, err)
-	}
-	if err := limiter.Commit(ctx, key, "keep"); err != nil {
-		t.Fatalf("unrelated reservation was deleted: %v", err)
-	}
-}
-
 func TestInitKeepsExistingUsage(t *testing.T) {
 	store := testStore(t)
 	limiter := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
