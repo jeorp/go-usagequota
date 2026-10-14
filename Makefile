@@ -4,10 +4,11 @@ test:
 	go test -race ./...
 
 test-core:
-	go test -race ./quota ./quota/memory
+	go test -race ./quota ./internal/memory
 
 vet:
 	go vet ./...
+	cd examples/postgresstore && go vet ./...
 
 demo:
 	go run ./examples/reservation
@@ -23,7 +24,7 @@ postgres-down:
 	docker compose down
 
 integration:
-	POSTGRES_TEST_DSN=postgres://quota:quota@127.0.0.1:$${QUOTA_POSTGRES_PORT:-55432}/quota?sslmode=disable go test -race -tags=integration -timeout=3m ./quota/postgresstore
+	cd examples/postgresstore && POSTGRES_TEST_DSN=postgres://quota:quota@127.0.0.1:$${QUOTA_POSTGRES_PORT:-55432}/quota?sslmode=disable go test -race -tags=integration -timeout=3m ./...
 
 fmt:
 	gofmt -w quota internal examples

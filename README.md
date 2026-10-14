@@ -8,15 +8,9 @@ A Go library for usage limits that remain consistent under concurrent requests a
 - **Charge each attempt:** Use `quota.Consume` inside an existing database transaction when an attempt counts even if later work fails.
 - **Set time-based limits:** Use `quota.Month`, `quota.Day`, or a custom `quota.Period` to scope a budget to an account and resource.
 
-## Storage
+## Stores
 
-| Package | Purpose |
-| --- | --- |
-| `quota` | Budget rules and the `Store` interface; standard library only |
-| `quota/memory` | In-process store for tests and local tools |
-| `quota/postgresstore` | Persistent store using PostgreSQL transactions and `database/sql` |
-
-The PostgreSQL store accepts a caller-owned `*sql.DB` and an existing schema name. Call `Init(ctx)` once to create its tables, or create them through your own migration. Register a PostgreSQL `database/sql` driver in the application.
+`quota.Store` is the public storage contract. An implementation must update usage and a reservation atomically. The repository includes a [PostgreSQL implementation example](examples/postgresstore/store.go) in a separate module and an internal memory store for tests and the demo. The library module has no database driver dependency.
 
 ## Get started
 

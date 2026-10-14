@@ -1,4 +1,4 @@
-// Package postgresstore implements quota.Store using PostgreSQL transactions.
+// Package postgresstore shows how to implement quota.Store with PostgreSQL transactions.
 // It accepts a database/sql connection; the caller supplies a PostgreSQL driver.
 package postgresstore
 

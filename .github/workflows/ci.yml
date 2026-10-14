@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
       - name: Formatting
         run: test -z "$(gofmt -l quota internal examples)"
       - run: go vet ./...
@@ -31,7 +31,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          cache-dependency-path: examples/postgresstore/go.sum
       - run: make postgres-up
       - run: make integration
       - name: PostgreSQL logs

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeorp/go-usagequota/internal/memory"
 	"github.com/jeorp/go-usagequota/internal/quotatest"
 	"github.com/jeorp/go-usagequota/quota"
-	"github.com/jeorp/go-usagequota/quota/memory"
 )
 
 func TestContract(t *testing.T) {

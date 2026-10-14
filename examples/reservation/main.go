@@ -8,8 +8,8 @@ import (
 	"log"
 	"time"
 
+	"github.com/jeorp/go-usagequota/internal/memory"
 	"github.com/jeorp/go-usagequota/quota"
-	"github.com/jeorp/go-usagequota/quota/memory"
 )
 
 func main() {

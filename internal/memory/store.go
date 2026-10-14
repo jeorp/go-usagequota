@@ -1,4 +1,4 @@
-// Package memory provides an in-process quota store for tests and local tools.
+// Package memory provides an in-process quota store for this module's tests and examples.
 // State is lost on restart. It is not shared across processes and has no eviction.
 package memory
 
