@@ -116,6 +116,44 @@ func TestRemainingAfterLimitDecrease(t *testing.T) {
 	}
 }
 
+func TestSpendCommitsAndReplays(t *testing.T) {
+	store := memory.New()
+	l := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
+	ctx, key := context.Background(), quotatest.Key()
+	first, err := l.Spend(ctx, key, "one", 2, 3)
+	if err != nil || !first.Created || first.Usage != (quota.Usage{Committed: 2}) {
+		t.Fatalf("first spend = %+v, %v", first, err)
+	}
+	replay, err := l.Spend(ctx, key, "one", 2, 1)
+	if err != nil || replay.Created || replay.Usage != (quota.Usage{Committed: 2}) {
+		t.Fatalf("replayed spend = %+v, %v", replay, err)
+	}
+	if _, err := l.Spend(ctx, key, "one", 1, 3); !errors.Is(err, quota.ErrConflict) {
+		t.Fatalf("conflicting spend = %v", err)
+	}
+	if _, err := l.Spend(ctx, key, "two", 2, 3); !errors.Is(err, quota.ErrExceeded) {
+		t.Fatalf("over-limit spend = %v", err)
+	}
+	if got, err := l.Usage(ctx, key); err != nil || got != (quota.Usage{Committed: 2}) {
+		t.Fatalf("usage = %+v, %v", got, err)
+	}
+}
+
+func TestSpendRetryDoesNotLeakCreatedResult(t *testing.T) {
+	store := fakeStore{update: func(fn func(*quota.Usage, *quota.Reservation) error) error {
+		u, r := quota.Usage{}, quota.Reservation{}
+		if err := fn(&u, &r); err != nil {
+			return err
+		}
+		return fn(&u, &r)
+	}}
+	l := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
+	result, err := l.Spend(context.Background(), quotatest.Key(), "one", 1, 1)
+	if err != nil || result.Created || result.Usage != (quota.Usage{Committed: 1}) {
+		t.Fatalf("retry = %+v, %v", result, err)
+	}
+}
+
 func FuzzAccounting(f *testing.F) {
 	f.Add([]byte{0, 0, 1, 2, 3, 0, 2, 1})
 	f.Add([]byte{255, 254, 253, 252, 0, 1})

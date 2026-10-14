@@ -28,7 +28,8 @@ type quotaReservation struct {
 	quota.Reservation `gorm:"embedded"`
 }
 
-// New accepts a base GORM connection, not an active transaction.
+// New accepts a base GORM connection or an active transaction. With an active
+// transaction, Update uses a savepoint and the caller controls the final commit.
 func New(db *gorm.DB) *Store {
 	return &Store{db: db}
 }

@@ -6,7 +6,35 @@ Use `quota.Month`, `quota.Day`, or a custom `quota.Period` to scope a budget to 
 
 ## Choose how to count usage
 
-Use `Consume` when **each attempt counts**, even if the work later fails. For example, count each time a user starts an API request. `Consume` calculates the new count; your code must read and save the counter in one transaction. Retrying a completed request counts again.
+| Need | Use | How it counts |
+| --- | --- | --- |
+| Every attempt counts, even if the work fails. | `Consume` | Calculates a count; your code saves it. Retries count again. |
+| Usage can be finalized now. | `Spend` | Records committed usage once per request ID. |
+| Work starts now and finishes later. | `Reserve` → `Commit` | Holds capacity while work is pending, then finalizes it. |
+
+`Consume` is only a calculation: it does not read or save a counter and has no request ID. To count an attempt even if the work fails, read the counter, call `Consume`, and save the result atomically before starting the work.
+
+`Spend` checks the limit and records committed usage in one atomic store update, without a pending reservation. Calling `Reserve` and then `Commit` in one transaction reaches the same final usage, but takes two store updates instead of one.
+
+Use a stable request ID with `Spend`. If the first charge committed, a retry with the same ID and amount returns `Created=false`; if it rolled back, the retry can create the charge. A different amount for the same ID returns `ErrConflict`.
+
+When business data and its charge must succeed together, put both operations in the same database transaction. With GORM and the [PostgreSQL example store](examples/postgresstore/store.go), pass the transaction to `postgresstore.New` and write the business record through that same transaction:
+
+```go
+err := db.Transaction(func(tx *gorm.DB) error {
+	limiter := quota.New(postgresstore.New(tx))
+	result, err := limiter.Spend(ctx, key, requestID, amount, limit)
+	if err != nil {
+		return err
+	}
+	if !result.Created {
+		return nil // The earlier transaction committed both the charge and the work.
+	}
+	return tx.Create(&work).Error
+})
+```
+
+Returning an error rolls back both the charge and the business write. The PostgreSQL store lives in the separate `github.com/jeorp/go-usagequota/examples/postgresstore` module. It uses a savepoint inside an existing GORM transaction, so keep GORM's nested transactions enabled for this pattern. The [integration test](examples/postgresstore/store_integration_test.go) covers both commit and rollback.
 
 Use `Reserve` → `Commit` when work has separate start and completion steps:
 
@@ -16,7 +44,7 @@ Use `Reserve` → `Commit` when work has separate start and completion steps:
 
 Both reserved and completed work count toward the limit. Use the same request ID when retrying: `Reserve` will not create a second reservation, and calling `Commit` again is safe. `Commit` requires an earlier `Reserve`.
 
-You can use either approach with a daily, monthly, or custom period.
+These approaches work with a daily, monthly, or custom period.
 
 ## Failures and retries
 
@@ -25,6 +53,7 @@ The limiter returns errors to the caller. It does not automatically retry operat
 | Operation | If the update is not saved | How to recover from a temporary storage error |
 | --- | --- | --- |
 | `Reserve` | No new reservation or usage is recorded. | Do not start work. Retry with the same key, request ID, and amount. |
+| `Spend` | The charge and business write both roll back when they share a transaction. | Retry the whole transaction with the same key, request ID, and amount. A committed request returns `Created=false`. |
 | `Commit` | An existing pending reservation stays pending and still counts toward the limit. | If the work succeeded, retry only `Commit`, not the work. Committing an already committed reservation succeeds without counting it again. |
 | `Cancel` | An existing pending reservation stays pending and still counts toward the limit. | Retry `Cancel` only when you know the work did not run. Cancelling an already cancelled reservation succeeds. |
 
@@ -47,7 +76,7 @@ Use `errors.Is` to inspect errors, including wrapped store errors. These errors 
 
 - `ErrInvalid`: fix the arguments.
 - `ErrExceeded`: the requested amount does not fit within the limit. Wait for capacity or a limit change before trying again.
-- `ErrOutsidePeriod`: the original period is not active for a new reservation.
+- `ErrOutsidePeriod`: the original period is not active for a new charge or reservation.
 - `ErrConflict`: the request ID already exists with a different amount.
 - `ErrNotFound`: `Commit` or `Cancel` has no matching reservation.
 - `ErrFinalized`: the requested operation conflicts with a committed or cancelled state.
@@ -69,7 +98,7 @@ Requires Go 1.25 or later.
 go get github.com/jeorp/go-usagequota@latest
 ```
 
-See [the runnable reservation example](examples/reservation/main.go) for `Reserve`, `Commit`, and `Cancel`. `Created` indicates a new reservation; the caller remains responsible for running and recovering the job. Cancel only when work definitely did not run.
+See [the runnable reservation example](examples/reservation/main.go) for `Reserve`, `Commit`, and `Cancel`, or the [PostgreSQL integration test](examples/postgresstore/store_integration_test.go) for `Spend` with a business write in one transaction. For reservations, `Created` indicates a new reservation; the caller remains responsible for running and recovering the job. Cancel only when work definitely did not run.
 
 Keep the original budget key and reservation records for retries. The library does not expire reservations or delete old records automatically.
 
