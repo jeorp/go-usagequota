@@ -15,6 +15,7 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 	"gorm.io/gorm/schema"
 
@@ -66,7 +67,7 @@ func testStore(t *testing.T) *Store {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := db.WithContext(ctx).Migrator().DropTable(&quotaBudget{}); err != nil {
+		if err := db.WithContext(ctx).Migrator().DropTable(&quotaReservation{}, &quotaBudget{}); err != nil {
 			t.Error(err)
 		}
 	})
@@ -129,6 +130,33 @@ func TestCancelledUpdateRollsBack(t *testing.T) {
 	}
 }
 
+func TestReservationSaveErrorRollsBackBudget(t *testing.T) {
+	store := testStore(t)
+	table := clause.Table{Name: store.db.NamingStrategy.TableName("quotaReservation")}
+	if err := store.db.Exec("ALTER TABLE ? ADD CHECK (amount > 0)", table).Error; err != nil {
+		t.Fatal(err)
+	}
+	ctx, key := context.Background(), quotatest.Key()
+	limiter := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
+	if _, err := limiter.Reserve(ctx, key, "id", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	err := store.Update(ctx, key, "id", func(usage *quota.Usage, reservation *quota.Reservation) error {
+		*usage = quota.Usage{Committed: 1}
+		*reservation = quota.Reservation{Amount: -1, State: quota.Committed}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("invalid reservation was saved")
+	}
+	if usage, err := store.Read(ctx, key); err != nil || usage != (quota.Usage{Reserved: 1}) {
+		t.Fatalf("budget after failed save = %+v, %v", usage, err)
+	}
+	if err := limiter.Commit(ctx, key, "id"); err != nil {
+		t.Fatalf("original reservation was not preserved: %v", err)
+	}
+}
+
 func TestUpdateClearsReservation(t *testing.T) {
 	store := testStore(t)
 	ctx, key := context.Background(), quotatest.Key()
@@ -173,7 +201,18 @@ func TestInitKeepsExistingUsage(t *testing.T) {
 	}
 }
 
-func TestRequestIDsSurviveJSON(t *testing.T) {
+func TestInitRejectsLegacyJSONLayout(t *testing.T) {
+	store := testStore(t)
+	table := clause.Table{Name: store.db.NamingStrategy.TableName("quotaBudget")}
+	if err := store.db.Exec("ALTER TABLE ? ADD COLUMN reservations jsonb", table).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(context.Background()); err == nil {
+		t.Fatal("initialization accepted unmigrated JSON reservations")
+	}
+}
+
+func TestRequestIDsPreserveBytes(t *testing.T) {
 	store := testStore(t)
 	limiter := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
 	ctx, key := context.Background(), quotatest.Key()

@@ -55,41 +55,11 @@ Use `errors.Is` to inspect errors, including wrapped store errors. These errors 
 
 ## Stores
 
-`quota.Store` is the public storage contract. An implementation must update usage and a reservation atomically. The repository includes a [GORM/PostgreSQL implementation example](examples/postgresstore/store.go) in a separate module and an internal memory store for tests and the demo. GORM and its driver are dependencies of the example only; the library module has no database driver dependency.
+`quota.Store` is the public storage contract. An implementation must update usage and a reservation atomically. The repository includes a [PostgreSQL example](examples/postgresstore/store.go) in a separate module and an internal memory store for tests and the demo. The library module has no database driver dependency.
 
-### PostgreSQL with GORM
+The PostgreSQL example stores counters in `quota_budgets` and individual reservations in `quota_reservations`. Each update locks the budget and reads and writes only the requested reservation, within one transaction. Use short subject/resource and request IDs because they are indexed directly.
 
-The example stores one budget per row in `quota_budgets`:
-
-| Column | Contents |
-| --- | --- |
-| `key` | Subject, resource, and period boundaries encoded together as JSON text |
-| `reserved`, `committed` | Usage counters |
-| `reservations` | A JSON object containing that budget's reservations |
-
-Each update creates the row if needed, locks it with `FOR UPDATE`, calls the quota callback, and saves the row. All of this happens in one transaction, so concurrent requests cannot spend the same remaining capacity.
-
-`postgresstore.New` accepts a base `*gorm.DB` connection opened with `gorm.io/driver/postgres`, not an active transaction. The application owns the connection and closes it on shutdown.
-
-At application startup, using your context and PostgreSQL DSN:
-
-```go
-db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-if err != nil {
-    return err
-}
-store := postgresstore.New(db)
-if err := store.Init(ctx); err != nil {
-    return err
-}
-limiter := quota.New(store)
-```
-
-`Init` uses GORM's [AutoMigrate](https://gorm.io/docs/migration.html) to create or update the table from the model. Request IDs are Base64-encoded inside the JSON object so every ID can be stored without changing its identity.
-
-This example is intended for small reservation counts per budget and short subject/resource IDs. Every update reads and rewrites the budget's entire reservation object. For large budgets, store reservations in a separate table while keeping the same budget-row lock. Validation is handled by the quota library; the example does not add database check constraints.
-
-This is a new storage layout. The earlier `usagequota_budgets` and `usagequota_reservations` tables are not read, migrated, or deleted. If you have existing usage, migrate it before switching to this example; otherwise the new table starts with empty budgets.
+Migrate existing data before switching from an earlier example. `Init` rejects the former JSON reservation column to prevent silently ignoring its history. The older `usagequota_*` tables are not migrated automatically either.
 
 ## Get started
 

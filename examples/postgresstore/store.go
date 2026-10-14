@@ -1,10 +1,10 @@
-// Package postgresstore is a small GORM example for budgets with few reservations.
+// Package postgresstore implements quota.Store using GORM and PostgreSQL.
 package postgresstore
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/jeorp/go-usagequota/quota"
@@ -12,16 +12,21 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// Store saves each budget and its reservations in one row.
+// Store saves budgets and reservations in separate tables.
 // The caller owns the database connection.
 type Store struct {
 	db *gorm.DB
 }
 
 type quotaBudget struct {
-	Key          string `gorm:"primaryKey"`
-	quota.Usage  `gorm:"embedded"`
-	Reservations map[string]quota.Reservation `gorm:"serializer:json;type:jsonb"`
+	Key         string `gorm:"primaryKey"`
+	quota.Usage `gorm:"embedded"`
+}
+
+type quotaReservation struct {
+	BudgetKey         string `gorm:"primaryKey"`
+	RequestID         []byte `gorm:"primaryKey"`
+	quota.Reservation `gorm:"embedded"`
 }
 
 // New accepts a base GORM connection, not an active transaction.
@@ -29,34 +34,44 @@ func New(db *gorm.DB) *Store {
 	return &Store{db: db}
 }
 
-// Init creates the quota_budgets table using GORM's model definition.
+// Init creates the quota_budgets and quota_reservations tables.
+// Existing data from the earlier JSON layout must be migrated first.
 func (s *Store) Init(ctx context.Context) error {
-	return s.db.WithContext(ctx).AutoMigrate(&quotaBudget{})
+	db := s.db.WithContext(ctx)
+	if db.Migrator().HasColumn(&quotaBudget{}, "reservations") {
+		return errors.New("postgresstore: migrate JSON reservations to quota_reservations and remove the old reservations column before initialization")
+	}
+	return db.AutoMigrate(&quotaBudget{}, &quotaReservation{})
 }
 
 func (s *Store) Update(ctx context.Context, key quota.Key, requestID string, fn func(*quota.Usage, *quota.Reservation) error) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		row := quotaBudget{Key: budgetKey(key)}
-		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
+		budget := quotaBudget{Key: budgetKey(key)}
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&budget).Error; err != nil {
 			return err
 		}
 		// Every writer locks the budget, including when creating a reservation.
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&budget).Error; err != nil {
 			return err
 		}
 
-		// Encode IDs so arbitrary bytes, including NUL, are safe as JSON keys.
-		id := base64.StdEncoding.EncodeToString([]byte(requestID))
-		usage, reservation := row.Usage, row.Reservations[id]
+		row := quotaReservation{BudgetKey: budget.Key, RequestID: []byte(requestID)}
+		if err := tx.Where("budget_key = ? AND request_id = ?", row.BudgetKey, row.RequestID).Find(&row).Error; err != nil {
+			return err
+		}
+		usage, reservation := budget.Usage, row.Reservation
 		if err := fn(&usage, &reservation); err != nil {
 			return err
 		}
 
-		row.Usage = usage
-		if row.Reservations == nil {
-			row.Reservations = make(map[string]quota.Reservation)
+		budget.Usage = usage
+		if err := tx.Save(&budget).Error; err != nil {
+			return err
 		}
-		row.Reservations[id] = reservation
+		if reservation == (quota.Reservation{}) {
+			return tx.Delete(&row).Error
+		}
+		row.Reservation = reservation
 		return tx.Save(&row).Error
 	})
 }
