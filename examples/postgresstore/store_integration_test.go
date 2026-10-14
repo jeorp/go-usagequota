@@ -4,6 +4,7 @@ package postgresstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -15,12 +16,13 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+	"gorm.io/gorm/schema"
 
 	"github.com/jeorp/go-usagequota/internal/quotatest"
 	"github.com/jeorp/go-usagequota/quota"
 )
 
-var schemaSequence atomic.Uint64
+var tableSequence atomic.Uint64
 
 func testDSN(t *testing.T) string {
 	t.Helper()
@@ -37,9 +39,9 @@ func testDSN(t *testing.T) string {
 	return dsn
 }
 
-func testDB(t *testing.T) *gorm.DB {
+func testDB(t *testing.T, naming schema.Namer) *gorm.DB {
 	t.Helper()
-	db, err := gorm.Open(postgres.Open(testDSN(t)), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	db, err := gorm.Open(postgres.Open(testDSN(t)), &gorm.Config{NamingStrategy: naming, Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,27 +61,17 @@ func testDB(t *testing.T) *gorm.DB {
 
 func testStore(t *testing.T) *Store {
 	t.Helper()
-	schema := fmt.Sprintf("quota_test_%d_%d", time.Now().UnixNano(), schemaSequence.Add(1))
-	return testStoreInSchema(t, schema)
-}
-
-func testStoreInSchema(t *testing.T, schema string) *Store {
-	t.Helper()
-	db := testDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := db.WithContext(ctx).Exec("CREATE SCHEMA " + quoteIdentifier(schema)).Error; err != nil {
-		t.Fatal(err)
-	}
+	prefix := fmt.Sprintf("quota_test_%d_%d_", time.Now().UnixNano(), tableSequence.Add(1))
+	db := testDB(t, schema.NamingStrategy{TablePrefix: prefix})
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := db.WithContext(ctx).Exec("DROP SCHEMA " + quoteIdentifier(schema) + " CASCADE").Error; err != nil {
+		if err := db.WithContext(ctx).Migrator().DropTable(&quotaBudget{}); err != nil {
 			t.Error(err)
 		}
 	})
-	store := New(db, schema)
-	if err := store.Init(ctx); err != nil {
+	store := New(db)
+	if err := store.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	return store
@@ -91,8 +83,8 @@ func TestContract(t *testing.T) {
 
 func TestIndependentClientsShareBudget(t *testing.T) {
 	store := testStore(t)
-	db := testDB(t)
-	other := New(db, store.schema)
+	db := testDB(t, store.db.NamingStrategy)
+	other := New(db)
 	ctx, key := context.Background(), quotatest.Key()
 	clock := quota.WithClock(func() time.Time { return quotatest.Now })
 	first, second := quota.New(store, clock), quota.New(other, clock)
@@ -110,20 +102,23 @@ func TestIndependentClientsShareBudget(t *testing.T) {
 	}
 }
 
-func TestWriteErrorRollsBackUsage(t *testing.T) {
+func TestCancelledUpdateRollsBack(t *testing.T) {
 	store := testStore(t)
 	ctx, key := context.Background(), quotatest.Key()
 	limiter := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
 	if _, err := limiter.Reserve(ctx, key, "id", 1, 1); err != nil {
 		t.Fatal(err)
 	}
-	err := store.Update(ctx, key, "id", func(usage *quota.Usage, reservation *quota.Reservation) error {
+	cancelled, cancel := context.WithCancel(ctx)
+	defer cancel()
+	err := store.Update(cancelled, key, "id", func(usage *quota.Usage, reservation *quota.Reservation) error {
 		*usage = quota.Usage{Committed: 1}
-		reservation.State = "invalid"
+		reservation.State = quota.Committed
+		cancel()
 		return nil
 	})
-	if err == nil {
-		t.Fatal("invalid reservation was saved")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled update: %v", err)
 	}
 	usage, err := store.Read(ctx, key)
 	if err != nil || usage != (quota.Usage{Reserved: 1}) {
@@ -160,21 +155,45 @@ func TestUpdateClearsReservation(t *testing.T) {
 	}
 }
 
-func TestQuotedSchema(t *testing.T) {
-	schema := fmt.Sprintf("quota.test_%d_\"quoted\"", time.Now().UnixNano())
-	store := testStoreInSchema(t, schema)
-	if err := store.Init(context.Background()); err != nil {
-		t.Fatalf("repeated initialization: %v", err)
-	}
+func TestInitKeepsExistingUsage(t *testing.T) {
+	store := testStore(t)
 	limiter := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
 	ctx, key := context.Background(), quotatest.Key()
 	if _, err := limiter.Reserve(ctx, key, "id", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := limiter.Commit(ctx, key, "id"); err != nil {
 		t.Fatal(err)
 	}
 	if usage, err := limiter.Usage(ctx, key); err != nil || usage != (quota.Usage{Committed: 1}) {
+		t.Fatalf("usage = %+v, %v", usage, err)
+	}
+}
+
+func TestRequestIDsSurviveJSON(t *testing.T) {
+	store := testStore(t)
+	limiter := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
+	ctx, key := context.Background(), quotatest.Key()
+	ids := []string{"\xff", "\xfe", "\ufffd", "a\x00b"}
+	for _, id := range ids {
+		result, err := limiter.Reserve(ctx, key, id, 1, int64(len(ids)))
+		if err != nil || !result.Created {
+			t.Fatalf("reserve %q = %+v, %v", id, result, err)
+		}
+	}
+	for _, id := range ids {
+		result, err := limiter.Reserve(ctx, key, id, 1, int64(len(ids)))
+		if err != nil || result.Created {
+			t.Fatalf("replay %q = %+v, %v", id, result, err)
+		}
+		if err := limiter.Commit(ctx, key, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if usage, err := limiter.Usage(ctx, key); err != nil || usage != (quota.Usage{Committed: int64(len(ids))}) {
 		t.Fatalf("usage = %+v, %v", usage, err)
 	}
 }

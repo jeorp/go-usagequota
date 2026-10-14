@@ -59,7 +59,17 @@ Use `errors.Is` to inspect errors, including wrapped store errors. These errors 
 
 ### PostgreSQL with GORM
 
-`postgresstore.New` accepts a `*gorm.DB` opened with `gorm.io/driver/postgres`. Pass the base connection, not an active transaction, so each operation commits before returning success. The application owns the connection and closes it on shutdown.
+The example stores one budget per row in `quota_budgets`:
+
+| Column | Contents |
+| --- | --- |
+| `key` | Subject, resource, and period boundaries encoded together as JSON text |
+| `reserved`, `committed` | Usage counters |
+| `reservations` | A JSON object containing that budget's reservations |
+
+Each update creates the row if needed, locks it with `FOR UPDATE`, calls the quota callback, and saves the row. All of this happens in one transaction, so concurrent requests cannot spend the same remaining capacity.
+
+`postgresstore.New` accepts a base `*gorm.DB` connection opened with `gorm.io/driver/postgres`, not an active transaction. The application owns the connection and closes it on shutdown.
 
 At application startup, using your context and PostgreSQL DSN:
 
@@ -68,14 +78,18 @@ db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 if err != nil {
     return err
 }
-store := postgresstore.New(db, "public")
+store := postgresstore.New(db)
 if err := store.Init(ctx); err != nil {
     return err
 }
 limiter := quota.New(store)
 ```
 
-`Init` creates missing tables in an existing schema. The [schema definition](examples/postgresstore/schema.go) uses explicit SQL to preserve the database constraints and leaves existing tables unchanged. Applications can create the same tables through their own migrations instead. Existing data from the `database/sql` example uses the same tables and keys and needs no conversion.
+`Init` uses GORM's [AutoMigrate](https://gorm.io/docs/migration.html) to create or update the table from the model. Request IDs are Base64-encoded inside the JSON object so every ID can be stored without changing its identity.
+
+This example is intended for small reservation counts per budget and short subject/resource IDs. Every update reads and rewrites the budget's entire reservation object. For large budgets, store reservations in a separate table while keeping the same budget-row lock. Validation is handled by the quota library; the example does not add database check constraints.
+
+This is a new storage layout. The earlier `usagequota_budgets` and `usagequota_reservations` tables are not read, migrated, or deleted. If you have existing usage, migrate it before switching to this example; otherwise the new table starts with empty budgets.
 
 ## Get started
 
