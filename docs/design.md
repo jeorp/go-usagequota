@@ -1,74 +1,9 @@
-# 利用枠管理の設計
+# Design notes
 
-## 解決する問題
+A budget is identified by a subject, a resource, and a half-open time period. The caller supplies the limit for each reservation. Pending and committed usage both count against it.
 
-利用量の読み取りと加算が別々だと、残り1回の状態で複数要求が同時に通ります。また、処理開始前の加算だけでは失敗時に枠が減り続け、成功後の加算だけでは実行中の要求を上限に含められません。
+Replaying a pending or committed reservation with the same request ID and amount does not charge twice. `Commit` moves pending usage to committed usage; `Cancel` releases it. A completed or cancelled request ID cannot be reused for new work. `quota.Consume` is a separate calculation for counters that charge every attempt; the caller must read and save the counter in one transaction.
 
-このライブラリは、利用枠を予約・確定・返却の3操作として扱います。処理の実行やプランの決定は呼び出し元が担当します。
+Stores update usage and a reservation atomically. The memory store is local to one process. The PostgreSQL store locks the budget row during updates, so requests for the same budget run in sequence. It does not join an application's existing transaction.
 
-既存の試行回数カウンターには、より小さいAPIの `Consume(used, amount, limit)` を提供します。これは上限判定と加算結果の計算だけを行い、永続化はしません。既存トランザクション内で使用でき、生成結果に関係なく試行回数を数える用途で保存形式を維持できます。冪等な予約が必要な場合はLimiterを使います。
-
-## 状態と不変条件
-
-```text
-未作成 --Reserve--> pending --Commit--> committed
-                      |
-                      +--Cancel--> cancelled
-```
-
-- `Reserved` はpendingの量の合計、`Committed`はcommittedの量の合計。
-- 予約の追加時は `Reserved + Committed + amount <= limit` を満たす。
-- Commitは量をReservedからCommittedへ移し、合計を変えない。
-- CancelはReservedから量を減らす。
-- committedとcancelledは終端状態。同じ操作の繰り返しは成功し、別の終端状態には移れない。
-- リクエストIDと量の組み合わせを保持し、異なる量での再利用を拒否する。
-
-上限は呼び出し元が決めるので、すでに使った量より上限を下げた場合もあり得ます。この場合は新規予約を拒否し、残量は0と表示します。上限の永続化・バージョン管理は行いません。古い設定を持つワーカーから高い上限を渡さないよう、アプリ側で設定を統一する必要があります。
-
-## 原子性の境界
-
-`Store.Update` は利用枠と指定した予約を一つの原子的な更新として扱います。コアはFirestoreへ直接依存せず、状態遷移をこのコールバック内で行います。
-
-メモリストアはキャンセル可能なゲートで直列化します。単一のゲートを使うため、異なるキー同士も直列化されます。テスト用として単純さを優先しています。
-
-Firestoreストアは利用枠と予約の2ドキュメントをトランザクションで読み、変更があれば両方を保存します。既存の予約を再送した場合は不要な書き込みを行いません。競合時の再試行はSDKが担当し、再試行の上限を超えたらエラーを返します。コールバックには外部API呼び出しやログ送信などの副作用を置きません。
-
-1ドキュメントに全IDを詰め込まないため、予約件数に比例して利用枠ドキュメントが巨大化することはありません。一方、同じ利用者・機能・期間への更新は1ドキュメントに集中します。大量の全体共通枠を高頻度で更新する用途では、Firestoreの競合や費用を実測し、別のストアも検討します。スループットの保証はしていません。
-
-## 時刻と期間
-
-時刻はテスト可能な関数として注入できます。新規予約はトランザクションの試行ごとに期間内か検査します。DBコミットの実時刻が必ず終了時刻より前であるという保証ではありません。
-
-期間の境界は予算の識別子の一部です。終了日時を変更すると別の予算になるため、請求期間の修正やタイムゾーンの変更を単にKeyの差し替えで処理してはいけません。アプリ側で移行方針を決めます。同一期間を別のtime.Locationで表しても同じキーになるようUTCへ正規化します。
-
-CommitとCancelは現在時刻で予算を再計算しません。開始時のKeyをジョブへ保存し、処理完了時にも同じKeyを使います。新しい月の枠を、前月の処理の確定・返却で変更しないためです。
-
-## 障害と再実行
-
-`Created=true` を得た呼び出しだけが新しい処理を始めます。ただし、その直後にプロセスが落ちると予約だけが残ります。このライブラリは実行権のリース・ジョブキュー・結果キャッシュを提供しません。
-
-| 障害 | アプリ側で必要な対応 |
-| --- | --- |
-| 予約直後に停止 | 永続化されたジョブと照合し、実行の再開または返却を判断 |
-| 外部APIがタイムアウト | 失敗と断定せず、外部側の冪等キーやジョブ状態から結果を確認 |
-| 外部処理成功後にCommit失敗 | 同じKey・IDでCommitを再試行。外部処理をもう一度実行しない |
-| 予約トランザクションの結果が不明 | 同じKey・ID・量でReserveを再送し、アプリの処理状態と照合 |
-
-予約だけが残ったからといって自動的に期限切れにすると、遅れて成功した外部処理と新しい予約の両方が枠を使える危険があります。初期版は明示的な返却を採用しています。利用枠の原子性と外部処理のexactly-once実行は別の保証です。
-
-## 保持と削除
-
-予約ドキュメントを消すと、そのIDの再利用を検出できなくなります。利用枠ドキュメントだけを消しても整合性が崩れます。初期版にはTTL・自動削除・全件列挙を含めていません。運用で削除する場合は、期間終了・未確定処理の回復・再送受付期間の終了を確認し、利用枠と予約を一緒に削除する仕組みを別途用意します。Firestoreでは親ドキュメントを削除してもサブコレクションは削除されません。
-
-## テスト方針
-
-単なる関数の呼び出し確認ではなく、不変条件と障害境界を検証します。
-
-- 同じ契約テストをメモリとFirestoreに適用する。
-- 100件の同時要求に対する上限と冪等性を確認する。
-- Firestoreが競合でAbortedを返した要求は、同時要求が完了してから1回再試行する。未コミットが確実な場合に限り、再試行後も上限と冪等性が保たれることを検証する。一時エラーが発生しないという可用性の保証ではない。
-- CommitとCancelの競合で、片方だけが終端状態を確定できることを確認する。
-- コールバック失敗時に部分更新が残らないことを確認する。
-- SDKの再試行を模したストアで、Createdフラグや時刻判定を確認する。
-- 状態遷移を生成し、独立した参照モデルのカウンターと照合する。
-- 月末・年末・夏時間・整数上限を確認する。
+The library does not execute jobs, resolve an uncertain external result, expire reservations, or delete old records. Keep the original budget key for retries and finalization. Retain reservation records for as long as duplicate requests must be recognized.

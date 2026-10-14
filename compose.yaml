@@ -1,13 +1,16 @@
 name: go-usagequota
 
 services:
-  firestore:
-    build: ./infra/firestore
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: quota
+      POSTGRES_USER: quota
+      POSTGRES_PASSWORD: quota
     ports:
-      - "127.0.0.1:${QUOTA_EMULATOR_PORT:-8086}:8080"
+      - "127.0.0.1:${QUOTA_POSTGRES_PORT:-55432}:5432"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/').catch(()=>process.exit(1))"]
+      test: ["CMD-SHELL", "pg_isready -U quota -d quota"]
       interval: 2s
       timeout: 2s
-      retries: 60
-      start_period: 10s
+      retries: 30

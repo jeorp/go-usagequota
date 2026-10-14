@@ -1,4 +1,4 @@
-.PHONY: test test-core vet demo fuzz integration emulator-up emulator-down fmt
+.PHONY: test test-core vet demo fuzz integration postgres-up postgres-down fmt
 
 test:
 	go test -race ./...
@@ -16,14 +16,14 @@ fuzz:
 	go test ./quota -run '^$$' -fuzz FuzzAccounting -fuzztime=10s
 	go test ./quota -run '^$$' -fuzz FuzzConsume -fuzztime=10s
 
-emulator-up:
-	docker compose up --build --wait firestore
+postgres-up:
+	docker compose up --wait postgres
 
-emulator-down:
+postgres-down:
 	docker compose down
 
 integration:
-	FIRESTORE_EMULATOR_HOST=127.0.0.1:$${QUOTA_EMULATOR_PORT:-8086} go test -race -tags=integration -timeout=3m ./quota/firestorestore
+	POSTGRES_TEST_DSN=postgres://quota:quota@127.0.0.1:$${QUOTA_POSTGRES_PORT:-55432}/quota?sslmode=disable go test -race -tags=integration -timeout=3m ./quota/postgresstore
 
 fmt:
 	gofmt -w quota internal examples
