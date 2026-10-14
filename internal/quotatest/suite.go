@@ -22,6 +22,7 @@ func Key() quota.Key {
 // Run checks the behavior callers rely on regardless of which store they use.
 func Run(t *testing.T, factory func(*testing.T) quota.Store) {
 	t.Helper()
+	t.Run("spend", func(t *testing.T) { runSpend(t, factory) })
 	ctx := context.Background()
 	newLimiter := func(store quota.Store) *quota.Limiter {
 		return quota.New(store, quota.WithClock(func() time.Time { return Now }))

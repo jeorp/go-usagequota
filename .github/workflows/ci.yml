@@ -37,7 +37,7 @@ jobs:
       - name: Formatting
         run: test -z "$(gofmt -l quota internal examples)"
       - run: go vet ./...
-      - run: go test -race ./...
+      - run: make test
       - run: go test ./quota -run '^$' -fuzz FuzzAccounting -fuzztime=10s
       - run: go test ./quota -run '^$' -fuzz FuzzConsume -fuzztime=10s
       - run: go run ./examples/reservation

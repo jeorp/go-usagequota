@@ -35,6 +35,9 @@ func TestInvalidArguments(t *testing.T) {
 			if _, err := l.Reserve(context.Background(), tc.key, tc.id, tc.amount, tc.limit); !errors.Is(err, quota.ErrInvalid) {
 				t.Fatalf("reserve = %v", err)
 			}
+			if _, err := l.Spend(context.Background(), tc.key, tc.id, tc.amount, tc.limit); !errors.Is(err, quota.ErrInvalid) {
+				t.Fatalf("spend = %v", err)
+			}
 		})
 	}
 }
@@ -92,8 +95,9 @@ func TestStoreErrorIsWrapped(t *testing.T) {
 	l := quota.New(fakeStore{err: sentinel})
 	ctx, key := context.Background(), quotatest.Key()
 	_, reserveErr := l.Reserve(ctx, key, "id", 1, 1)
+	_, spendErr := l.Spend(ctx, key, "id", 1, 1)
 	_, usageErr := l.Usage(ctx, key)
-	for _, err := range []error{reserveErr, usageErr, l.Commit(ctx, key, "id"), l.Cancel(ctx, key, "id")} {
+	for _, err := range []error{reserveErr, spendErr, usageErr, l.Commit(ctx, key, "id"), l.Cancel(ctx, key, "id")} {
 		if !errors.Is(err, sentinel) {
 			t.Fatalf("lost store error: %v", err)
 		}
@@ -116,29 +120,6 @@ func TestRemainingAfterLimitDecrease(t *testing.T) {
 	}
 }
 
-func TestSpendCommitsAndReplays(t *testing.T) {
-	store := memory.New()
-	l := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))
-	ctx, key := context.Background(), quotatest.Key()
-	first, err := l.Spend(ctx, key, "one", 2, 3)
-	if err != nil || !first.Created || first.Usage != (quota.Usage{Committed: 2}) {
-		t.Fatalf("first spend = %+v, %v", first, err)
-	}
-	replay, err := l.Spend(ctx, key, "one", 2, 1)
-	if err != nil || replay.Created || replay.Usage != (quota.Usage{Committed: 2}) {
-		t.Fatalf("replayed spend = %+v, %v", replay, err)
-	}
-	if _, err := l.Spend(ctx, key, "one", 1, 3); !errors.Is(err, quota.ErrConflict) {
-		t.Fatalf("conflicting spend = %v", err)
-	}
-	if _, err := l.Spend(ctx, key, "two", 2, 3); !errors.Is(err, quota.ErrExceeded) {
-		t.Fatalf("over-limit spend = %v", err)
-	}
-	if got, err := l.Usage(ctx, key); err != nil || got != (quota.Usage{Committed: 2}) {
-		t.Fatalf("usage = %+v, %v", got, err)
-	}
-}
-
 func TestSpendRetryDoesNotLeakCreatedResult(t *testing.T) {
 	store := fakeStore{update: func(fn func(*quota.Usage, *quota.Reservation) error) error {
 		u, r := quota.Usage{}, quota.Reservation{}
@@ -154,9 +135,26 @@ func TestSpendRetryDoesNotLeakCreatedResult(t *testing.T) {
 	}
 }
 
+func TestSpendTransactionRetryRechecksClock(t *testing.T) {
+	at, key := quotatest.Now, quotatest.Key()
+	store := fakeStore{update: func(fn func(*quota.Usage, *quota.Reservation) error) error {
+		if err := fn(&quota.Usage{}, &quota.Reservation{}); err != nil {
+			return err
+		}
+		at = key.Period.End
+		return fn(&quota.Usage{}, &quota.Reservation{})
+	}}
+	l := quota.New(store, quota.WithClock(func() time.Time { return at }))
+	result, err := l.Spend(context.Background(), key, "one", 1, 1)
+	if !errors.Is(err, quota.ErrOutsidePeriod) || result != (quota.SpendResult{}) {
+		t.Fatalf("retry = %+v, %v", result, err)
+	}
+}
+
 func FuzzAccounting(f *testing.F) {
 	f.Add([]byte{0, 0, 1, 2, 3, 0, 2, 1})
 	f.Add([]byte{255, 254, 253, 252, 0, 1})
+	f.Add([]byte{3, 3, 0, 1, 2, 4, 7, 6, 7, 11, 15, 19})
 	f.Fuzz(func(t *testing.T, operations []byte) {
 		if len(operations) > 1024 {
 			operations = operations[:1024]
@@ -167,9 +165,9 @@ func FuzzAccounting(f *testing.F) {
 		// Compare arbitrary operation sequences across eight request IDs with
 		// an independent model of the expected reservation states.
 		for step, op := range operations {
-			id := string(rune('a' + (op/3)%8))
+			id := string(rune('a' + (op/4)%8))
 			var wantErr, gotErr error
-			switch op % 3 {
+			switch op % 4 {
 			case 0:
 				_, gotErr = l.Reserve(ctx, key, id, 1, 3)
 				switch states[id] {
@@ -184,7 +182,7 @@ func FuzzAccounting(f *testing.F) {
 				}
 			case 1, 2:
 				target := quota.Committed
-				if op%3 == 1 {
+				if op%4 == 1 {
 					gotErr = l.Commit(ctx, key, id)
 				} else {
 					target = quota.Cancelled
@@ -200,9 +198,21 @@ func FuzzAccounting(f *testing.F) {
 						wantErr = quota.ErrFinalized
 					}
 				}
+			case 3:
+				_, gotErr = l.Spend(ctx, key, id, 1, 3)
+				switch states[id] {
+				case quota.Pending, quota.Cancelled:
+					wantErr = quota.ErrFinalized
+				case "":
+					if modeledUsage(states).Total() == 3 {
+						wantErr = quota.ErrExceeded
+					} else {
+						states[id] = quota.Committed
+					}
+				}
 			}
 			if !errors.Is(gotErr, wantErr) {
-				t.Fatalf("step %d, operation %d, request %q: got %v, want %v", step, op%3, id, gotErr, wantErr)
+				t.Fatalf("step %d, operation %d, request %q: got %v, want %v", step, op%4, id, gotErr, wantErr)
 			}
 			u, err := l.Usage(ctx, key)
 			wantUsage := modeledUsage(states)

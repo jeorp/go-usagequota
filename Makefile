@@ -2,6 +2,7 @@
 
 test:
 	go test -race ./...
+	cd examples/postgresstore && go test -race ./...
 
 test-core:
 	go test -race ./quota ./internal/memory

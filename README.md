@@ -4,6 +4,39 @@ A Go library for usage limits that remain consistent under concurrent requests a
 
 Use `quota.Month`, `quota.Day`, or a custom `quota.Period` to scope a budget to an account and resource.
 
+For example, an account may have a budget of 100 AI reviews per month. Pending reviews hold capacity, completed reviews remain charged, and retrying the same request does not charge twice.
+
+## Try it
+
+Requires Go 1.25 or later. The demo runs in memory and needs no database.
+
+```sh
+git clone https://github.com/jeorp/go-usagequota.git
+cd go-usagequota
+make demo
+```
+
+The [demo](examples/reservation/main.go) uses a one-review budget so you can see the limit, retry, and cancellation behavior:
+
+```text
+first request: new reservation = true
+retry: new reservation = false
+second request: limit exceeded
+first request: cancelled
+second request: committed
+usage: reserved=0 committed=1 remaining=0
+```
+
+## Use in your application
+
+```sh
+go get github.com/jeorp/go-usagequota@latest
+```
+
+Import `github.com/jeorp/go-usagequota/quota`. `Consume` works with a counter managed by your application; `Spend` and `Reserve` require a `quota.Store` implementation.
+
+For PostgreSQL, copy and adapt the [example store](examples/postgresstore/store.go) into your application, add its GORM dependencies, and call `store.Init(ctx)` to create the tables before using `quota.New(store)`. The example is a separate module for development in this repository, not a separately versioned adapter. The memory store is internal to this repository and is only used by tests and the demo.
+
 ## Choose how to count usage
 
 | Need | Use | How it counts |
@@ -77,17 +110,17 @@ The PostgreSQL example stores counters in `quota_budgets` and individual reserva
 
 Earlier examples used a different storage layout. Migrate their data before switching; `Init` does not convert existing reservations.
 
-## Get started
+## Design choices
 
-Requires Go 1.25 or later.
+A separate read, limit check, and counter update can admit too much work when requests race. Retrying after an uncertain response can also charge the same work twice. The limiter addresses these problems through atomic store updates and request IDs scoped to a budget.
 
-```sh
-go get github.com/jeorp/go-usagequota@latest
-```
-
-See the [runnable reservation example](examples/reservation/main.go) for `Reserve`, `Commit`, and `Cancel`.
+- **Separate policy from persistence.** The core module has no database dependencies. Stores provide serialization and atomic writes; the limiter handles limits and reservation transitions.
+- **Serialize each budget.** The PostgreSQL example locks one budget row so competing requests share a consistent counter. This favors simple accounting guarantees, but a heavily used single budget can become a contention point.
+- **Leave work recovery to the application.** A reservation records accounting state, not whether an external operation ran. Automatic expiration could release capacity while work is still running, so pending reservations require explicit reconciliation.
 
 ## Check the project
+
+`make test` runs tests with race detection in both modules without PostgreSQL. `make lint` requires `golangci-lint` (CI uses v2.13.2). Integration tests require Docker Compose; `make fuzz` runs the accounting and counter fuzz tests.
 
 ```sh
 make test
@@ -97,3 +130,7 @@ make postgres-up
 make integration
 make postgres-down
 ```
+
+## License
+
+[MIT](LICENSE)
