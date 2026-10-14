@@ -89,6 +89,12 @@ type Result struct {
 	Created     bool
 }
 
+// SpendResult reports an immediately committed charge and the resulting usage.
+type SpendResult struct {
+	Usage   Usage
+	Created bool
+}
+
 // Store persists a budget and its reservations. Implementations must serialize
 // concurrent updates to the same Key across all clients sharing the store.
 //
@@ -175,6 +181,46 @@ func (l *Limiter) Reserve(ctx context.Context, key Key, requestID string, amount
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("reserve: %w", err)
+	}
+	return result, nil
+}
+
+// Spend atomically commits an allowance without a pending reservation. It is
+// suitable when the caller saves the work and its quota in one transaction.
+// Reusing the same request ID with the same amount is idempotent.
+func (l *Limiter) Spend(ctx context.Context, key Key, requestID string, amount, limit int64) (SpendResult, error) {
+	if !key.valid() || requestID == "" || amount <= 0 || limit < 0 {
+		return SpendResult{}, ErrInvalid
+	}
+	var result SpendResult
+	err := l.store.Update(ctx, key.Canonical(), requestID, func(usage *Usage, reservation *Reservation) error {
+		result = SpendResult{}
+		if err := validate(*usage, *reservation); err != nil {
+			return err
+		}
+		if reservation.State != "" {
+			if reservation.Amount != amount {
+				return ErrConflict
+			}
+			if reservation.State != Committed {
+				return ErrFinalized
+			}
+			result = SpendResult{Usage: *usage}
+			return nil
+		}
+		if !key.Period.Contains(l.now()) {
+			return ErrOutsidePeriod
+		}
+		if _, err := Consume(usage.Total(), amount, limit); err != nil {
+			return err
+		}
+		usage.Committed += amount
+		*reservation = Reservation{Amount: amount, State: Committed}
+		result = SpendResult{Usage: *usage, Created: true}
+		return nil
+	})
+	if err != nil {
+		return SpendResult{}, fmt.Errorf("spend: %w", err)
 	}
 	return result, nil
 }
