@@ -2,11 +2,19 @@
 
 A Go library for usage limits that remain consistent under concurrent requests and retries.
 
-## Use cases
+Use `quota.Month`, `quota.Day`, or a custom `quota.Period` to scope a budget to an account and resource.
 
-- **Reserve before work:** Hold capacity for a job, commit it after success, or cancel it when the job definitely did not run. Reusing a request ID does not charge twice.
-- **Charge each attempt:** Use `quota.Consume` inside an existing database transaction when an attempt counts even if later work fails.
-- **Set time-based limits:** Use `quota.Month`, `quota.Day`, or a custom `quota.Period` to scope a budget to an account and resource.
+## Consume vs. Reserve and Commit
+
+`Commit` completes an earlier `Reserve`; it is not a standalone way to charge usage.
+
+| | `Consume` | `Reserve` → `Commit` |
+| --- | --- | --- |
+| Use when | Every attempt counts, even if later work fails | Only completed work should count, but work in progress must hold capacity |
+| Flow | Calculate the next counter value and save it in the caller's transaction | Reserve before work, commit after confirmed success, or cancel if work definitely did not run |
+| Retries | No built-in deduplication | The same request ID does not reserve twice; repeating `Commit` is safe |
+
+For example, use `Consume` for a daily draft-generation attempt limit and `Reserve` → `Commit` for a monthly completed-review limit.
 
 ## Stores
 
