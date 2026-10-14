@@ -59,7 +59,7 @@ Use `errors.Is` to inspect errors, including wrapped store errors. These errors 
 
 The PostgreSQL example stores counters in `quota_budgets` and individual reservations in `quota_reservations`. Each update locks the budget and reads and writes only the requested reservation, within one transaction. Use short subject/resource and request IDs because they are indexed directly.
 
-Migrate existing data before switching from an earlier example. `Init` rejects the former JSON reservation column to prevent silently ignoring its history. The older `usagequota_*` tables are not migrated automatically either.
+Earlier examples used a different storage layout. Migrate their data before switching; `Init` does not convert existing reservations.
 
 ## Get started
 

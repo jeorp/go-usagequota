@@ -201,17 +201,6 @@ func TestInitKeepsExistingUsage(t *testing.T) {
 	}
 }
 
-func TestInitRejectsLegacyJSONLayout(t *testing.T) {
-	store := testStore(t)
-	table := clause.Table{Name: store.db.NamingStrategy.TableName("quotaBudget")}
-	if err := store.db.Exec("ALTER TABLE ? ADD COLUMN reservations jsonb", table).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Init(context.Background()); err == nil {
-		t.Fatal("initialization accepted unmigrated JSON reservations")
-	}
-}
-
 func TestRequestIDsPreserveBytes(t *testing.T) {
 	store := testStore(t)
 	limiter := quota.New(store, quota.WithClock(func() time.Time { return quotatest.Now }))

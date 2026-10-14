@@ -4,7 +4,6 @@ package postgresstore
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"time"
 
 	"github.com/jeorp/go-usagequota/quota"
@@ -35,13 +34,8 @@ func New(db *gorm.DB) *Store {
 }
 
 // Init creates the quota_budgets and quota_reservations tables.
-// Existing data from the earlier JSON layout must be migrated first.
 func (s *Store) Init(ctx context.Context) error {
-	db := s.db.WithContext(ctx)
-	if db.Migrator().HasColumn(&quotaBudget{}, "reservations") {
-		return errors.New("postgresstore: migrate JSON reservations to quota_reservations and remove the old reservations column before initialization")
-	}
-	return db.AutoMigrate(&quotaBudget{}, &quotaReservation{})
+	return s.db.WithContext(ctx).AutoMigrate(&quotaBudget{}, &quotaReservation{})
 }
 
 func (s *Store) Update(ctx context.Context, key quota.Key, requestID string, fn func(*quota.Usage, *quota.Reservation) error) error {
