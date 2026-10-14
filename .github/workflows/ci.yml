@@ -1,0 +1,42 @@
+name: Go
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Formatting
+        run: test -z "$(gofmt -l quota internal examples)"
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go test ./quota -run '^$' -fuzz FuzzAccounting -fuzztime=10s
+      - run: go test ./quota -run '^$' -fuzz FuzzConsume -fuzztime=10s
+      - run: go run ./examples/reservation
+
+  firestore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make emulator-up
+      - run: make integration
+      - name: Emulator logs
+        if: failure()
+        run: docker compose logs firestore
+      - name: Stop emulator
+        if: always()
+        run: make emulator-down

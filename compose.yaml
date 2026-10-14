@@ -1,0 +1,13 @@
+name: go-usagequota
+
+services:
+  firestore:
+    build: ./infra/firestore
+    ports:
+      - "127.0.0.1:${QUOTA_EMULATOR_PORT:-8086}:8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/').catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 10s
